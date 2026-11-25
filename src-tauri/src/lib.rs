@@ -7,7 +7,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{LazyLock, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
+use tauri::Emitter;
 use walkdir::WalkDir;
 
 #[cfg(target_os = "windows")]
@@ -83,6 +84,16 @@ pub struct FileProperties {
     pub created_ms: u64,
     pub readonly: bool,
     pub sha256: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TransferProgress {
+    pub operation: String, // "copy" | "move"
+    pub current_file: String,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub speed_bps: u64,
+    pub done: bool,
 }
 
 #[derive(Serialize)]
@@ -968,16 +979,99 @@ fn batch_rename(pairs: Vec<(String, String)>) -> Result<usize, String> {
     Ok(count)
 }
 
-fn copy_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+fn calc_sources_total_bytes(sources: &[String]) -> u64 {
+    let mut total = 0u64;
+    for s in sources {
+        let p = Path::new(s);
+        if p.is_dir() {
+            for e in WalkDir::new(p).into_iter().flatten() {
+                if let Ok(m) = e.metadata() {
+                    if m.is_file() {
+                        total += m.len();
+                    }
+                }
+            }
+        } else if let Ok(m) = fs::metadata(p) {
+            total += m.len();
+        }
+    }
+    total
+}
+
+fn copy_file_streamed(
+    src: &Path,
+    dst: &Path,
+    app: &tauri::AppHandle,
+    op: &str,
+    bytes_done: &mut u64,
+    bytes_total: u64,
+    started: Instant,
+    last_emit: &mut Instant,
+) -> Result<(), String> {
+    let mut reader = File::open(src).map_err(|e| e.to_string())?;
+    let mut writer = File::create(dst).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; 256 * 1024];
+    let fname = src
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        writer.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        *bytes_done += n as u64;
+
+        if last_emit.elapsed().as_millis() >= 80 {
+            let elapsed = started.elapsed().as_secs_f64().max(0.001);
+            let speed_bps = (*bytes_done as f64 / elapsed) as u64;
+            let _ = app.emit(
+                "nkf://transfer-progress",
+                TransferProgress {
+                    operation: op.to_string(),
+                    current_file: fname.clone(),
+                    bytes_done: *bytes_done,
+                    bytes_total,
+                    speed_bps,
+                    done: false,
+                },
+            );
+            *last_emit = Instant::now();
+        }
+    }
+    Ok(())
+}
+
+fn copy_recursive_streamed(
+    src: &Path,
+    dst: &Path,
+    app: &tauri::AppHandle,
+    op: &str,
+    bytes_done: &mut u64,
+    bytes_total: u64,
+    started: Instant,
+    last_emit: &mut Instant,
+) -> Result<(), String> {
     if src.is_dir() {
         fs::create_dir_all(dst).map_err(|e| e.to_string())?;
         for entry in fs::read_dir(src).map_err(|e| e.to_string())?.flatten() {
             let child_src = entry.path();
             let child_dst = dst.join(entry.file_name());
-            copy_recursive(&child_src, &child_dst)?;
+            copy_recursive_streamed(
+                &child_src,
+                &child_dst,
+                app,
+                op,
+                bytes_done,
+                bytes_total,
+                started,
+                last_emit,
+            )?;
         }
     } else {
-        fs::copy(src, dst).map_err(|e| e.to_string())?;
+        copy_file_streamed(src, dst, app, op, bytes_done, bytes_total, started, last_emit)?;
     }
     Ok(())
 }
@@ -1006,38 +1100,106 @@ fn unique_dest(dest_dir: &Path, name: &str) -> PathBuf {
 }
 
 #[tauri::command]
-fn copy_items(sources: Vec<String>, dest_dir: String) -> Result<usize, String> {
-    let dest = PathBuf::from(&dest_dir);
-    let mut count = 0;
-    for s in sources {
-        let src = PathBuf::from(&s);
-        let Some(name) = src.file_name() else { continue };
-        let target = unique_dest(&dest, &name.to_string_lossy());
-        copy_recursive(&src, &target)?;
-        count += 1;
-    }
-    Ok(count)
+async fn copy_items(
+    app: tauri::AppHandle,
+    sources: Vec<String>,
+    dest_dir: String,
+) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dest = PathBuf::from(&dest_dir);
+        let bytes_total = calc_sources_total_bytes(&sources);
+        let mut bytes_done = 0u64;
+        let started = Instant::now();
+        let mut last_emit = Instant::now();
+        let mut count = 0;
+
+        for s in sources {
+            let src = PathBuf::from(&s);
+            let Some(name) = src.file_name() else { continue };
+            let target = unique_dest(&dest, &name.to_string_lossy());
+            copy_recursive_streamed(
+                &src,
+                &target,
+                &app,
+                "copy",
+                &mut bytes_done,
+                bytes_total,
+                started,
+                &mut last_emit,
+            )?;
+            count += 1;
+        }
+
+        let _ = app.emit(
+            "nkf://transfer-progress",
+            TransferProgress {
+                operation: "copy".to_string(),
+                current_file: String::new(),
+                bytes_done: bytes_total,
+                bytes_total,
+                speed_bps: 0,
+                done: true,
+            },
+        );
+        Ok(count)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn move_items(sources: Vec<String>, dest_dir: String) -> Result<usize, String> {
-    let dest = PathBuf::from(&dest_dir);
-    let mut count = 0;
-    for s in sources {
-        let src = PathBuf::from(&s);
-        let Some(name) = src.file_name() else { continue };
-        let target = unique_dest(&dest, &name.to_string_lossy());
-        if fs::rename(&src, &target).is_err() {
-            copy_recursive(&src, &target)?;
-            if src.is_dir() {
-                fs::remove_dir_all(&src).map_err(|e| e.to_string())?;
-            } else {
-                fs::remove_file(&src).map_err(|e| e.to_string())?;
+async fn move_items(
+    app: tauri::AppHandle,
+    sources: Vec<String>,
+    dest_dir: String,
+) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dest = PathBuf::from(&dest_dir);
+        let bytes_total = calc_sources_total_bytes(&sources);
+        let mut bytes_done = 0u64;
+        let started = Instant::now();
+        let mut last_emit = Instant::now();
+        let mut count = 0;
+
+        for s in sources {
+            let src = PathBuf::from(&s);
+            let Some(name) = src.file_name() else { continue };
+            let target = unique_dest(&dest, &name.to_string_lossy());
+            if fs::rename(&src, &target).is_err() {
+                copy_recursive_streamed(
+                    &src,
+                    &target,
+                    &app,
+                    "move",
+                    &mut bytes_done,
+                    bytes_total,
+                    started,
+                    &mut last_emit,
+                )?;
+                if src.is_dir() {
+                    fs::remove_dir_all(&src).map_err(|e| e.to_string())?;
+                } else {
+                    fs::remove_file(&src).map_err(|e| e.to_string())?;
+                }
             }
+            count += 1;
         }
-        count += 1;
-    }
-    Ok(count)
+
+        let _ = app.emit(
+            "nkf://transfer-progress",
+            TransferProgress {
+                operation: "move".to_string(),
+                current_file: String::new(),
+                bytes_done: bytes_total,
+                bytes_total,
+                speed_bps: 0,
+                done: true,
+            },
+        );
+        Ok(count)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1432,6 +1594,35 @@ fn get_file_properties(path: String, compute_hash: bool) -> Result<FilePropertie
     })
 }
 
+#[tauri::command]
+fn write_text_file(path: String, content: String) -> Result<(), String> {
+    fs::write(&path, content.as_bytes()).map_err(|e| format!("Failed to save file: {}", e))
+}
+
+#[tauri::command]
+fn get_git_branch(dir: String) -> Option<String> {
+    let mut cur = PathBuf::from(&dir);
+    for _ in 0..8 {
+        let head = cur.join(".git").join("HEAD");
+        if head.is_file() {
+            if let Ok(content) = fs::read_to_string(&head) {
+                let line = content.trim();
+                if let Some(branch) = line.strip_prefix("ref: refs/heads/") {
+                    return Some(branch.to_string());
+                }
+                if line.len() >= 7 {
+                    return Some(line[..7].to_string());
+                }
+            }
+            return None;
+        }
+        if !cur.pop() {
+            break;
+        }
+    }
+    None
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1447,6 +1638,8 @@ pub fn run() {
             get_image_thumb,
             find_duplicates,
             get_file_properties,
+            write_text_file,
+            get_git_branch,
             list_directory,
             read_preview,
             search_files,

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   Home,
   Monitor,
@@ -33,9 +34,17 @@ import {
   Network,
   RefreshCw,
   CopyCheck,
+  Command,
 } from "lucide-react";
 import { BUILTIN_THEMES, applyThemeToRoot, type ThemeDefinition } from "./lib/themes";
-import { nkfApi, type FileEntry, type NetworkShareItem, type PlaceItem } from "./lib/api";
+import {
+  fmtBytes,
+  nkfApi,
+  type FileEntry,
+  type NetworkShareItem,
+  type PlaceItem,
+  type TransferProgress,
+} from "./lib/api";
 import { FilePane, type ViewMode } from "./components/FilePane";
 import { QuickLookModal } from "./components/QuickLookModal";
 import { BatchRenameModal } from "./components/BatchRenameModal";
@@ -44,6 +53,7 @@ import { NetworkShareModal } from "./components/NetworkShareModal";
 import { DuplicatesModal } from "./components/DuplicatesModal";
 import { PropertiesModal } from "./components/PropertiesModal";
 import { ContextMenu, type ContextMenuState } from "./components/ContextMenu";
+import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 
 interface TabState {
   id: string;
@@ -147,6 +157,8 @@ export default function App() {
   const [duplicatesOpen, setDuplicatesOpen] = useState(false);
   const [propertiesPath, setPropertiesPath] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [transfer, setTransfer] = useState<TransferProgress | null>(null);
 
   // Toast
   const [toast, setToast] = useState<{ msg: string; isError?: boolean } | null>(null);
@@ -192,6 +204,26 @@ export default function App() {
     applyThemeToRoot(found);
     localStorage.setItem("nkf_theme", found.id);
   }, [themeId, allThemes]);
+
+  // Listen for streaming copy/move transfer progress + auto-refresh on window focus
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<TransferProgress>("nkf://transfer-progress", (ev) => {
+      if (ev.payload.done) setTransfer(null);
+      else setTransfer(ev.payload);
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {});
+
+    const onFocus = () => setRefreshTick((t) => t + 1);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      unlisten?.();
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
 
   const activeLeftTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
   const currentDir = activePane === "left" ? activeLeftTab?.path || "" : rightPane.path;
@@ -468,6 +500,9 @@ export default function App() {
       } else if (e.key === " " && !inInput && selectedEntries.length > 0 && !quickLookEntry) {
         e.preventDefault();
         setQuickLookEntry(selectedEntries[0]);
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "h") {
         e.preventDefault();
         setShowHidden((v) => !v);
@@ -709,8 +744,18 @@ export default function App() {
           </button>
         </div>
 
-        {/* Right: Bookmark, Support, Theme */}
+        {/* Right: Palette, Bookmark, Support, Theme */}
         <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => setPaletteOpen(true)}
+            className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium cursor-pointer"
+            style={{ background: "var(--surface-alt)", color: "var(--text-muted)" }}
+            title="Command Palette (Ctrl+K)"
+          >
+            <Command size={13} /> Ctrl+K
+          </button>
+
           <button
             type="button"
             onClick={toggleBookmark}
@@ -1050,6 +1095,47 @@ export default function App() {
         </main>
       </div>
 
+      {/* TRANSFER PROGRESS CARD */}
+      {transfer && (
+        <div
+          className="fixed bottom-4 left-4 z-50 w-80 p-3.5 rounded-2xl shadow-2xl border space-y-2"
+          style={{ background: "var(--surface)", borderColor: "var(--accent)" }}
+        >
+          <div className="flex items-center justify-between text-xs font-semibold">
+            <span className="capitalize">
+              {transfer.operation === "copy" ? "Copying" : "Moving"}...
+            </span>
+            <span className="font-mono" style={{ color: "var(--accent)" }}>
+              {transfer.bytes_total > 0
+                ? `${Math.min(100, Math.round((transfer.bytes_done / transfer.bytes_total) * 100))}%`
+                : "…"}
+            </span>
+          </div>
+          <div className="text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
+            {transfer.current_file}
+          </div>
+          <div className="h-1.5 rounded-full overflow-hidden bg-black/30">
+            <div
+              className="h-full rounded-full transition-all"
+              style={{
+                width: `${
+                  transfer.bytes_total > 0
+                    ? Math.min(100, (transfer.bytes_done / transfer.bytes_total) * 100)
+                    : 15
+                }%`,
+                background: "var(--accent)",
+              }}
+            />
+          </div>
+          <div className="flex justify-between text-[10px] font-mono" style={{ color: "var(--text-muted)" }}>
+            <span>
+              {fmtBytes(transfer.bytes_done)} / {fmtBytes(transfer.bytes_total)}
+            </span>
+            <span>{fmtBytes(transfer.speed_bps)}/s</span>
+          </div>
+        </div>
+      )}
+
       {/* TOAST */}
       {toast && (
         <div
@@ -1066,7 +1152,94 @@ export default function App() {
       )}
 
       {/* MODALS */}
-      <QuickLookModal entry={quickLookEntry} onClose={() => setQuickLookEntry(null)} />
+      <QuickLookModal
+        entry={quickLookEntry}
+        onClose={() => setQuickLookEntry(null)}
+        onSaved={(name) => {
+          triggerRefresh();
+          showToast(`Saved "${name}"`);
+        }}
+      />
+
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        commands={
+          [
+            {
+              id: "act-split",
+              label: splitMode ? "Disable Dual-Pane Split View" : "Enable Dual-Pane Split View",
+              category: "Action",
+              shortcut: "F3",
+              run: () => setSplitMode((v) => !v),
+            },
+            {
+              id: "act-term",
+              label: "Open Terminal in Current Folder",
+              category: "Action",
+              shortcut: "F4",
+              run: () =>
+                currentDir &&
+                nkfApi.openTerminalHere(currentDir).catch((e) => showToast(String(e), true)),
+            },
+            {
+              id: "act-disk",
+              label: "Disk Space Analyzer",
+              category: "Tools",
+              run: () => setDiskUsageOpen(true),
+            },
+            {
+              id: "act-dups",
+              label: "Find Duplicate Files (SHA-256)",
+              category: "Tools",
+              run: () => setDuplicatesOpen(true),
+            },
+            {
+              id: "act-net",
+              label: "Connect Network Share / Map Drive",
+              category: "Network",
+              run: () => setNetworkModalOpen(true),
+            },
+            {
+              id: "act-hidden",
+              label: showHidden ? "Hide Hidden Files" : "Show Hidden Files",
+              category: "View",
+              shortcut: "Ctrl+H",
+              run: () => setShowHidden((v) => !v),
+            },
+            {
+              id: "act-folder",
+              label: "Create New Folder",
+              category: "Action",
+              run: handleNewFolder,
+            },
+            ...places.map((p) => ({
+              id: `place-${p.path}`,
+              label: `Go to ${p.name}`,
+              category: "Place",
+              run: () => navigatePane(activePane, p.path),
+            })),
+            ...networkShares.map((s) => ({
+              id: `net-${s.path}`,
+              label: `Open Share: ${s.name}`,
+              category: "Network",
+              run: () => navigatePane(activePane, s.path),
+            })),
+            ...bookmarks.map((bm) => ({
+              id: `bm-${bm}`,
+              label: `Bookmark: ${baseName(bm)}`,
+              category: "Bookmark",
+              run: () => navigatePane(activePane, bm),
+            })),
+            ...allThemes.map((t) => ({
+              id: `theme-${t.id}`,
+              label: `Switch Theme → ${t.name}`,
+              category: "Theme",
+              run: () => setThemeId(t.id),
+            })),
+          ] as PaletteCommand[]
+        }
+      />
 
       <BatchRenameModal
         open={batchRenameOpen}

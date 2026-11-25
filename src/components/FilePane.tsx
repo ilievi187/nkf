@@ -19,6 +19,7 @@ import {
   ChevronRight,
   Loader2,
   X,
+  GitBranch,
 } from "lucide-react";
 import {
   fmtBytes,
@@ -177,6 +178,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dropHoverPath, setDropHoverPath] = useState<string | null>(null);
+  const [gitBranch, setGitBranch] = useState<string | null>(null);
 
   const [editingPath, setEditingPath] = useState(false);
   const [pathInput, setPathInput] = useState(path);
@@ -195,6 +197,9 @@ export const FilePane: React.FC<FilePaneProps> = ({
     setSearchResults(null);
     setFilterText("");
     setDeepSearch(false);
+    if (path) {
+      nkfApi.getGitBranch(path).then(setGitBranch).catch(() => setGitBranch(null));
+    }
   }, [path]);
 
   useEffect(() => {
@@ -648,11 +653,25 @@ export const FilePane: React.FC<FilePaneProps> = ({
         className="px-3 py-1 border-t flex items-center justify-between text-[11px] shrink-0"
         style={{ background: "var(--surface)", borderColor: "var(--border)", color: "var(--text-muted)" }}
       >
-        <span>
-          {displayed.length} item{displayed.length === 1 ? "" : "s"}
-          {selectedPaths.size > 0 ? ` • ${selectedPaths.size} selected` : ""}
-        </span>
-        <span className="hidden sm:inline">Space: Quick Look • F3: Split • F4: Terminal</span>
+        <div className="flex items-center gap-2.5">
+          <span>
+            {displayed.length} item{displayed.length === 1 ? "" : "s"}
+            {selectedPaths.size > 0 ? ` • ${selectedPaths.size} selected` : ""}
+          </span>
+          {gitBranch && (
+            <span
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-mono text-[10px]"
+              style={{
+                background: "color-mix(in srgb, var(--accent) 18%, transparent)",
+                color: "var(--accent)",
+              }}
+              title={`Git branch: ${gitBranch}`}
+            >
+              <GitBranch size={11} /> {gitBranch}
+            </span>
+          )}
+        </div>
+        <span className="hidden sm:inline">Ctrl+K: Palette • Space: Quick Look • F3: Split</span>
       </div>
     </section>
   );

@@ -60,6 +60,15 @@ export interface FileProperties {
   sha256: string | null;
 }
 
+export interface TransferProgress {
+  operation: "copy" | "move";
+  current_file: string;
+  bytes_done: number;
+  bytes_total: number;
+  speed_bps: number;
+  done: boolean;
+}
+
 export function fmtBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -199,6 +208,9 @@ export const nkfApi = {
   findDuplicates: (rootDir: string) => invoke<DuplicateGroup[]>("find_duplicates", { rootDir }),
   getFileProperties: (path: string, computeHash = false) =>
     invoke<FileProperties>("get_file_properties", { path, computeHash }),
+  writeTextFile: (path: string, content: string) =>
+    invoke<void>("write_text_file", { path, content }),
+  getGitBranch: (dir: string) => invoke<string | null>("get_git_branch", { dir }),
   connectNetworkShare: (
     sharePath: string,
     username: string,
