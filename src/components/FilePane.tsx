@@ -23,8 +23,10 @@ import {
 import {
   fmtBytes,
   fmtDate,
+  getCachedImageThumb,
   getCachedNativeIcon,
   getParentPath,
+  isPreviewableImage,
   nkfApi,
   splitBreadcrumbs,
   type FileEntry,
@@ -49,7 +51,8 @@ interface FilePaneProps {
   onForward: () => void;
   onSelectChange: (next: Set<string>, entries: FileEntry[]) => void;
   onOpenEntry: (entry: FileEntry) => void;
-  onQuickLook: (entry: FileEntry) => void;
+  onContextMenu: (e: React.MouseEvent, entry: FileEntry | null) => void;
+  onDropPaths: (sources: string[], destDir: string, isCopy: boolean) => void;
   onToggleViewMode: () => void;
   onRefresh: () => void;
 }
@@ -104,6 +107,52 @@ export const NativeFileIcon: React.FC<{ entry: FileEntry; size?: number }> = ({
   return renderFileIcon(entry, size);
 };
 
+const GridThumbnail: React.FC<{ entry: FileEntry }> = ({ entry }) => {
+  const [thumb, setThumb] = useState<string | null>(null);
+  const holderRef = useRef<HTMLDivElement>(null);
+  const canThumb = isPreviewableImage(entry);
+
+  useEffect(() => {
+    if (!canThumb) return;
+    const el = holderRef.current;
+    if (!el) return;
+    let active = true;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          io.disconnect();
+          getCachedImageThumb(entry.path).then((url) => {
+            if (active && url) setThumb(url);
+          });
+        }
+      },
+      { rootMargin: "120px" }
+    );
+    io.observe(el);
+    return () => {
+      active = false;
+      io.disconnect();
+    };
+  }, [canThumb, entry.path]);
+
+  return (
+    <div ref={holderRef} className="w-16 h-14 flex items-center justify-center overflow-hidden rounded-lg">
+      {thumb ? (
+        <img
+          src={thumb}
+          alt={entry.name}
+          loading="lazy"
+          decoding="async"
+          draggable={false}
+          className="w-full h-full object-cover rounded-lg"
+        />
+      ) : (
+        <NativeFileIcon entry={entry} size={36} />
+      )}
+    </div>
+  );
+};
+
 export const FilePane: React.FC<FilePaneProps> = ({
   isActive,
   path,
@@ -119,13 +168,15 @@ export const FilePane: React.FC<FilePaneProps> = ({
   onForward,
   onSelectChange,
   onOpenEntry,
-  onQuickLook,
+  onContextMenu,
+  onDropPaths,
   onToggleViewMode,
   onRefresh,
 }) => {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dropHoverPath, setDropHoverPath] = useState<string | null>(null);
 
   const [editingPath, setEditingPath] = useState(false);
   const [pathInput, setPathInput] = useState(path);
@@ -230,6 +281,28 @@ export const FilePane: React.FC<FilePaneProps> = ({
     else {
       setSortKey(key);
       setSortAsc(true);
+    }
+  };
+
+  const handleDragStart = (e: React.DragEvent, entry: FileEntry) => {
+    const paths = selectedPaths.has(entry.path) ? Array.from(selectedPaths) : [entry.path];
+    e.dataTransfer.setData("application/x-nkf-paths", JSON.stringify(paths));
+    e.dataTransfer.effectAllowed = "copyMove";
+  };
+
+  const handleDropOnTarget = (e: React.DragEvent, destDir: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDropHoverPath(null);
+    const raw = e.dataTransfer.getData("application/x-nkf-paths");
+    if (!raw) return;
+    try {
+      const sources: string[] = JSON.parse(raw);
+      if (sources.length > 0 && !sources.includes(destDir)) {
+        onDropPaths(sources, destDir, e.ctrlKey || e.metaKey);
+      }
+    } catch {
+      // ignore
     }
   };
 
@@ -388,6 +461,27 @@ export const FilePane: React.FC<FilePaneProps> = ({
       {/* File List / Grid */}
       <div
         className="flex-1 overflow-auto nkf-scroll"
+        style={{
+          outline: dropHoverPath === path ? "2px dashed var(--accent)" : "none",
+          outlineOffset: "-4px",
+        }}
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes("application/x-nkf-paths")) {
+            e.preventDefault();
+            setDropHoverPath(path);
+          }
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget === e.target) setDropHoverPath(null);
+        }}
+        onDrop={(e) => handleDropOnTarget(e, path)}
+        onContextMenu={(e) => {
+          if (e.target === e.currentTarget) {
+            e.preventDefault();
+            onFocus();
+            onContextMenu(e, null);
+          }
+        }}
         onClick={(e) => {
           if (e.target === e.currentTarget) {
             onSelectChange(new Set(), displayed);
@@ -434,16 +528,41 @@ export const FilePane: React.FC<FilePaneProps> = ({
                 return (
                   <tr
                     key={entry.path}
+                    draggable
+                    onDragStart={(e) => handleDragStart(e, entry)}
+                    onDragOver={(e) => {
+                      if (entry.is_dir && e.dataTransfer.types.includes("application/x-nkf-paths")) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDropHoverPath(entry.path);
+                      }
+                    }}
+                    onDragLeave={() => {
+                      if (dropHoverPath === entry.path) setDropHoverPath(null);
+                    }}
+                    onDrop={(e) => {
+                      if (entry.is_dir) handleDropOnTarget(e, entry.path);
+                    }}
                     onClick={(e) => handleRowClick(e, entry, idx)}
                     onDoubleClick={() => onOpenEntry(entry)}
                     onContextMenu={(e) => {
                       e.preventDefault();
-                      onQuickLook(entry);
+                      e.stopPropagation();
+                      if (!selectedPaths.has(entry.path)) {
+                        onSelectChange(new Set([entry.path]), displayed);
+                      }
+                      onFocus();
+                      onContextMenu(e, entry);
                     }}
                     className="border-b transition-colors cursor-pointer"
                     style={{
                       borderColor: "color-mix(in srgb, var(--border) 50%, transparent)",
-                      background: isSel ? "color-mix(in srgb, var(--accent) 22%, transparent)" : "transparent",
+                      background:
+                        dropHoverPath === entry.path
+                          ? "color-mix(in srgb, var(--accent) 35%, transparent)"
+                          : isSel
+                          ? "color-mix(in srgb, var(--accent) 22%, transparent)"
+                          : "transparent",
                     }}
                   >
                     <td className="py-1.5 px-3">
@@ -475,17 +594,44 @@ export const FilePane: React.FC<FilePaneProps> = ({
                 <button
                   key={entry.path}
                   type="button"
+                  draggable
+                  onDragStart={(e) => handleDragStart(e, entry)}
+                  onDragOver={(e) => {
+                    if (entry.is_dir && e.dataTransfer.types.includes("application/x-nkf-paths")) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setDropHoverPath(entry.path);
+                    }
+                  }}
+                  onDragLeave={() => {
+                    if (dropHoverPath === entry.path) setDropHoverPath(null);
+                  }}
+                  onDrop={(e) => {
+                    if (entry.is_dir) handleDropOnTarget(e, entry.path);
+                  }}
                   onClick={(e) => handleRowClick(e, entry, idx)}
                   onDoubleClick={() => onOpenEntry(entry)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!selectedPaths.has(entry.path)) {
+                      onSelectChange(new Set([entry.path]), displayed);
+                    }
+                    onFocus();
+                    onContextMenu(e, entry);
+                  }}
                   className="p-3 rounded-xl border flex flex-col items-center text-center gap-2 cursor-pointer transition-colors"
                   style={{
-                    background: isSel
-                      ? "color-mix(in srgb, var(--accent) 22%, transparent)"
-                      : "var(--surface)",
-                    borderColor: isSel ? "var(--accent)" : "var(--border)",
+                    background:
+                      dropHoverPath === entry.path
+                        ? "color-mix(in srgb, var(--accent) 35%, transparent)"
+                        : isSel
+                        ? "color-mix(in srgb, var(--accent) 22%, transparent)"
+                        : "var(--surface)",
+                    borderColor: isSel || dropHoverPath === entry.path ? "var(--accent)" : "var(--border)",
                   }}
                 >
-                  <NativeFileIcon entry={entry} size={36} />
+                  <GridThumbnail entry={entry} />
                   <span className="text-xs w-full truncate font-medium">{entry.name}</span>
                   <span className="text-[10px] font-mono" style={{ color: "var(--text-muted)" }}>
                     {entry.is_dir ? "Folder" : fmtBytes(entry.size)}

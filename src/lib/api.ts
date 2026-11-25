@@ -41,6 +41,25 @@ export interface DiskUsageItem {
   percent: number;
 }
 
+export interface DuplicateGroup {
+  hash: string;
+  size: number;
+  wasted_bytes: number;
+  files: FileEntry[];
+}
+
+export interface FileProperties {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+  item_count: number;
+  modified_ms: number;
+  created_ms: number;
+  readonly: boolean;
+  sha256: string | null;
+}
+
 export function fmtBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -149,11 +168,37 @@ export function getCachedNativeIcon(entry: FileEntry): Promise<string | null> {
   return p;
 }
 
+const imageThumbCache = new Map<string, string | null>();
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "gif", "svg", "bmp"]);
+
+export function isPreviewableImage(entry: FileEntry): boolean {
+  return !entry.is_dir && IMAGE_EXTS.has(entry.extension.toLowerCase());
+}
+
+export function getCachedImageThumb(path: string): Promise<string | null> {
+  if (imageThumbCache.has(path)) {
+    return Promise.resolve(imageThumbCache.get(path) ?? null);
+  }
+  return invoke<string | null>("get_image_thumb", { path })
+    .then((res) => {
+      if (imageThumbCache.size > 300) imageThumbCache.clear();
+      imageThumbCache.set(path, res);
+      return res;
+    })
+    .catch(() => {
+      imageThumbCache.set(path, null);
+      return null;
+    });
+}
+
 export const nkfApi = {
   getPlatform: () => invoke<string>("get_platform"),
   getInitialDir: () => invoke<string>("get_initial_dir"),
   getSystemPlaces: () => invoke<PlaceItem[]>("get_system_places"),
   getNetworkShares: () => invoke<NetworkShareItem[]>("get_network_shares"),
+  findDuplicates: (rootDir: string) => invoke<DuplicateGroup[]>("find_duplicates", { rootDir }),
+  getFileProperties: (path: string, computeHash = false) =>
+    invoke<FileProperties>("get_file_properties", { path, computeHash }),
   connectNetworkShare: (
     sharePath: string,
     username: string,

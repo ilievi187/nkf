@@ -32,6 +32,7 @@ import {
   Sparkles,
   Network,
   RefreshCw,
+  CopyCheck,
 } from "lucide-react";
 import { BUILTIN_THEMES, applyThemeToRoot, type ThemeDefinition } from "./lib/themes";
 import { nkfApi, type FileEntry, type NetworkShareItem, type PlaceItem } from "./lib/api";
@@ -40,6 +41,9 @@ import { QuickLookModal } from "./components/QuickLookModal";
 import { BatchRenameModal } from "./components/BatchRenameModal";
 import { DiskUsageModal } from "./components/DiskUsageModal";
 import { NetworkShareModal } from "./components/NetworkShareModal";
+import { DuplicatesModal } from "./components/DuplicatesModal";
+import { PropertiesModal } from "./components/PropertiesModal";
+import { ContextMenu, type ContextMenuState } from "./components/ContextMenu";
 
 interface TabState {
   id: string;
@@ -135,11 +139,14 @@ export default function App() {
   const [rightEntries, setRightEntries] = useState<FileEntry[]>([]);
   const [clipboard, setClipboard] = useState<ClipboardState | null>(null);
 
-  // Modals
+  // Modals & Context Menu
   const [quickLookEntry, setQuickLookEntry] = useState<FileEntry | null>(null);
   const [batchRenameOpen, setBatchRenameOpen] = useState(false);
   const [diskUsageOpen, setDiskUsageOpen] = useState(false);
   const [networkModalOpen, setNetworkModalOpen] = useState(false);
+  const [duplicatesOpen, setDuplicatesOpen] = useState(false);
+  const [propertiesPath, setPropertiesPath] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
   // Toast
   const [toast, setToast] = useState<{ msg: string; isError?: boolean } | null>(null);
@@ -408,6 +415,18 @@ export default function App() {
     }
   };
 
+  const handleDropPaths = async (sources: string[], destDir: string, isCopy: boolean) => {
+    try {
+      const count = isCopy
+        ? await nkfApi.copyItems(sources, destDir)
+        : await nkfApi.moveItems(sources, destDir);
+      triggerRefresh();
+      showToast(`${isCopy ? "Copied" : "Moved"} ${count} item(s) → ${baseName(destDir)}`);
+    } catch (e) {
+      showToast(String(e), true);
+    }
+  };
+
   const toggleBookmark = () => {
     if (!currentDir) return;
     const next = bookmarks.includes(currentDir)
@@ -653,6 +672,16 @@ export default function App() {
             title="Disk Space Analyzer (What's eating my disk?)"
           >
             <PieChart size={15} />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setDuplicatesOpen(true)}
+            className="p-1.5 rounded-lg cursor-pointer"
+            style={{ background: "var(--surface-alt)" }}
+            title="Find Duplicate Files (SHA-256)"
+          >
+            <CopyCheck size={15} />
           </button>
 
           <button
@@ -978,7 +1007,10 @@ export default function App() {
                 if (entry.is_dir) navigatePane("left", entry.path);
                 else nkfApi.openWithDefault(entry.path).catch((e) => showToast(String(e), true));
               }}
-              onQuickLook={setQuickLookEntry}
+              onContextMenu={(e, entry) =>
+                setContextMenu({ x: e.clientX, y: e.clientY, entry })
+              }
+              onDropPaths={handleDropPaths}
               onToggleViewMode={() => setViewMode((v) => (v === "list" ? "grid" : "list"))}
               onRefresh={triggerRefresh}
             />
@@ -1007,7 +1039,10 @@ export default function App() {
                 if (entry.is_dir) navigatePane("right", entry.path);
                 else nkfApi.openWithDefault(entry.path).catch((e) => showToast(String(e), true));
               }}
-              onQuickLook={setQuickLookEntry}
+              onContextMenu={(e, entry) =>
+                setContextMenu({ x: e.clientX, y: e.clientY, entry })
+              }
+              onDropPaths={handleDropPaths}
               onToggleViewMode={() => setViewMode((v) => (v === "list" ? "grid" : "list"))}
               onRefresh={triggerRefresh}
             />
@@ -1072,6 +1107,47 @@ export default function App() {
           showToast(`Connected to ${remoteLabel}`);
         }}
         onError={(msg) => showToast(msg, true)}
+      />
+
+      <DuplicatesModal
+        open={duplicatesOpen}
+        dirPath={currentDir}
+        onClose={() => setDuplicatesOpen(false)}
+        onDeleted={(count) => {
+          triggerRefresh();
+          showToast(`Moved ${count} duplicate(s) to Trash!`);
+        }}
+        onError={(msg) => showToast(msg, true)}
+      />
+
+      <PropertiesModal path={propertiesPath} onClose={() => setPropertiesPath(null)} />
+
+      <ContextMenu
+        menu={contextMenu}
+        selectedCount={activeSel.size}
+        hasClipboard={Boolean(clipboard)}
+        onClose={() => setContextMenu(null)}
+        onOpen={(entry) => {
+          if (entry.is_dir) navigatePane(activePane, entry.path);
+          else nkfApi.openWithDefault(entry.path).catch((e) => showToast(String(e), true));
+        }}
+        onQuickLook={setQuickLookEntry}
+        onCopy={handleCopy}
+        onCut={handleCut}
+        onPaste={handlePaste}
+        onCopyPath={(p) => {
+          navigator.clipboard.writeText(p).catch(() => {});
+          showToast("Copied full path to clipboard");
+        }}
+        onRename={handleRename}
+        onBatchRename={() => setBatchRenameOpen(true)}
+        onZip={handleZip}
+        onExtractZip={handleExtractZip}
+        onProperties={(p) => setPropertiesPath(p)}
+        onTerminal={() =>
+          currentDir && nkfApi.openTerminalHere(currentDir).catch((e) => showToast(String(e), true))
+        }
+        onDelete={() => handleDelete(false)}
       />
     </div>
   );

@@ -1,5 +1,6 @@
 use base64::Engine;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -61,6 +62,27 @@ pub struct DiskUsageItem {
     pub is_dir: bool,
     pub size: u64,
     pub percent: f64,
+}
+
+#[derive(Serialize)]
+pub struct DuplicateGroup {
+    pub hash: String,
+    pub size: u64,
+    pub wasted_bytes: u64,
+    pub files: Vec<FileEntry>,
+}
+
+#[derive(Serialize)]
+pub struct FileProperties {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub item_count: usize,
+    pub modified_ms: u64,
+    pub created_ms: u64,
+    pub readonly: bool,
+    pub sha256: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1252,6 +1274,164 @@ fn open_external_url(url: String) -> Result<(), String> {
     open_with_default(url)
 }
 
+fn hash_file_sha256(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|b| format!("{:02x}", b)).collect())
+}
+
+#[tauri::command]
+fn get_image_thumb(path: String) -> Option<String> {
+    let p = PathBuf::from(&path);
+    let meta = fs::metadata(&p).ok()?;
+    if meta.is_dir() || meta.len() > 8 * 1024 * 1024 {
+        return None;
+    }
+    let ext = p
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        _ => return None,
+    };
+    let bytes = fs::read(&p).ok()?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Some(format!("data:{};base64,{}", mime, b64))
+}
+
+#[tauri::command]
+fn find_duplicates(root_dir: String) -> Result<Vec<DuplicateGroup>, String> {
+    let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+
+    for entry in WalkDir::new(&root_dir)
+        .max_depth(8)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            !(name == ".git" || name == "node_modules" || name == "target")
+        })
+        .flatten()
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let size = meta.len();
+        if size == 0 {
+            continue;
+        }
+        by_size.entry(size).or_default().push(entry.into_path());
+    }
+
+    let mut by_hash: HashMap<String, (u64, Vec<FileEntry>)> = HashMap::new();
+    for (size, paths) in by_size {
+        if paths.len() < 2 {
+            continue;
+        }
+        for p in paths {
+            if let Ok(hash) = hash_file_sha256(&p) {
+                if let Some(fe) = entry_from_path(&p) {
+                    by_hash
+                        .entry(hash)
+                        .or_insert_with(|| (size, Vec::new()))
+                        .1
+                        .push(fe);
+                }
+            }
+        }
+    }
+
+    let mut groups: Vec<DuplicateGroup> = by_hash
+        .into_iter()
+        .filter(|(_, (_, files))| files.len() >= 2)
+        .map(|(hash, (size, files))| {
+            let wasted_bytes = size.saturating_mul((files.len() - 1) as u64);
+            DuplicateGroup {
+                hash,
+                size,
+                wasted_bytes,
+                files,
+            }
+        })
+        .collect();
+
+    groups.sort_by(|a, b| b.wasted_bytes.cmp(&a.wasted_bytes));
+    Ok(groups)
+}
+
+#[tauri::command]
+fn get_file_properties(path: String, compute_hash: bool) -> Result<FileProperties, String> {
+    let p = PathBuf::from(&path);
+    let meta = fs::metadata(&p).map_err(|e| e.to_string())?;
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    let is_dir = meta.is_dir();
+
+    let (size, item_count) = if is_dir {
+        let mut total = 0u64;
+        let mut count = 0usize;
+        for entry in WalkDir::new(&p).into_iter().flatten().skip(1) {
+            count += 1;
+            if let Ok(m) = entry.metadata() {
+                if m.is_file() {
+                    total += m.len();
+                }
+            }
+        }
+        (total, count)
+    } else {
+        (meta.len(), 1)
+    };
+
+    let modified_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let created_ms = meta
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let sha256 = if !is_dir && compute_hash {
+        hash_file_sha256(&p).ok()
+    } else {
+        None
+    };
+
+    Ok(FileProperties {
+        name,
+        path,
+        is_dir,
+        size,
+        item_count,
+        modified_ms,
+        created_ms,
+        readonly: meta.permissions().readonly(),
+        sha256,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1264,6 +1444,9 @@ pub fn run() {
             connect_network_share,
             disconnect_network_share,
             get_native_icon,
+            get_image_thumb,
+            find_duplicates,
+            get_file_properties,
             list_directory,
             read_preview,
             search_files,
