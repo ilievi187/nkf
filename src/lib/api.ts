@@ -69,6 +69,16 @@ export interface TransferProgress {
   done: boolean;
 }
 
+export interface CompareItem {
+  name: string;
+  status: "only_left" | "only_right" | "different" | "same";
+  left_path: string | null;
+  right_path: string | null;
+  left_size: number;
+  right_size: number;
+  is_dir: boolean;
+}
+
 export function fmtBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -211,6 +221,8 @@ export const nkfApi = {
   writeTextFile: (path: string, content: string) =>
     invoke<void>("write_text_file", { path, content }),
   getGitBranch: (dir: string) => invoke<string | null>("get_git_branch", { dir }),
+  compareFolders: (leftDir: string, rightDir: string) =>
+    invoke<CompareItem[]>("compare_folders", { leftDir, rightDir }),
   connectNetworkShare: (
     sharePath: string,
     username: string,

@@ -35,10 +35,13 @@ import {
   RefreshCw,
   CopyCheck,
   Command,
+  GitCompareArrows,
+  Clock,
 } from "lucide-react";
 import { BUILTIN_THEMES, applyThemeToRoot, type ThemeDefinition } from "./lib/themes";
 import {
   fmtBytes,
+  getParentPath,
   nkfApi,
   type FileEntry,
   type NetworkShareItem,
@@ -54,6 +57,7 @@ import { DuplicatesModal } from "./components/DuplicatesModal";
 import { PropertiesModal } from "./components/PropertiesModal";
 import { ContextMenu, type ContextMenuState } from "./components/ContextMenu";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
+import { FolderCompareModal } from "./components/FolderCompareModal";
 
 interface TabState {
   id: string;
@@ -69,6 +73,7 @@ interface ClipboardState {
 
 const BOOKMARKS_KEY = "nkf_bookmarks";
 const SAVED_SHARES_KEY = "nkf_saved_shares";
+const RECENT_DIRS_KEY = "nkf_recent_dirs";
 
 function placeIcon(kind: string) {
   switch (kind) {
@@ -124,6 +129,13 @@ export default function App() {
       return [];
     }
   });
+  const [recentDirs, setRecentDirs] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(RECENT_DIRS_KEY) || "[]");
+    } catch {
+      return [];
+    }
+  });
 
   // Tabs (left pane) + Split View (right pane)
   const [tabs, setTabs] = useState<TabState[]>([]);
@@ -158,6 +170,7 @@ export default function App() {
   const [propertiesPath, setPropertiesPath] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
   const [transfer, setTransfer] = useState<TransferProgress | null>(null);
 
   // Toast
@@ -242,6 +255,13 @@ export default function App() {
   // Navigation helpers
   const navigatePane = useCallback(
     (pane: "left" | "right", targetPath: string) => {
+      if (targetPath) {
+        setRecentDirs((prev) => {
+          const next = [targetPath, ...prev.filter((d) => d !== targetPath)].slice(0, 8);
+          localStorage.setItem(RECENT_DIRS_KEY, JSON.stringify(next));
+          return next;
+        });
+      }
       if (pane === "left") {
         setLeftSel(new Set());
         setTabs((prev) =>
@@ -518,6 +538,38 @@ export default function App() {
       } else if (e.key === "Delete" && !inInput && activeSel.size > 0) {
         e.preventDefault();
         handleDelete(e.shiftKey);
+      } else if (e.key === "Backspace" && !inInput && currentDir && !paletteOpen && !quickLookEntry) {
+        e.preventDefault();
+        navigatePane(activePane, getParentPath(currentDir));
+      } else if (
+        (e.key === "ArrowDown" || e.key === "ArrowUp") &&
+        !inInput &&
+        !paletteOpen &&
+        !quickLookEntry &&
+        activeEntries.length > 0
+      ) {
+        e.preventDefault();
+        const curPath = Array.from(activeSel)[0];
+        const curIdx = activeEntries.findIndex((item) => item.path === curPath);
+        const delta = e.key === "ArrowDown" ? 1 : -1;
+        const nextIdx =
+          curIdx < 0
+            ? 0
+            : Math.max(0, Math.min(activeEntries.length - 1, curIdx + delta));
+        const nextSet = new Set([activeEntries[nextIdx].path]);
+        if (activePane === "left") setLeftSel(nextSet);
+        else setRightSel(nextSet);
+      } else if (
+        e.key === "Enter" &&
+        !inInput &&
+        !paletteOpen &&
+        !quickLookEntry &&
+        selectedEntries.length === 1
+      ) {
+        e.preventDefault();
+        const item = selectedEntries[0];
+        if (item.is_dir) navigatePane(activePane, item.path);
+        else nkfApi.openWithDefault(item.path).catch((err) => showToast(String(err), true));
       }
     };
     window.addEventListener("keydown", onKey);
@@ -627,6 +679,18 @@ export default function App() {
           >
             <ClipboardPaste size={15} />
           </button>
+
+          {splitMode && (
+            <button
+              type="button"
+              onClick={() => setCompareOpen(true)}
+              className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium cursor-pointer shrink-0"
+              style={{ background: "var(--surface-alt)" }}
+              title="Compare & Sync Left and Right folders"
+            >
+              <GitCompareArrows size={13} style={{ color: "var(--accent)" }} /> Compare
+            </button>
+          )}
 
           {splitMode && activeSel.size > 0 && (
             <button
@@ -1025,6 +1089,34 @@ export default function App() {
               </div>
             </div>
           )}
+          {recentDirs.length > 0 && (
+            <div>
+              <div
+                className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider"
+                style={{ color: "var(--text-muted)" }}
+              >
+                Recent
+              </div>
+              <div className="space-y-0.5">
+                {recentDirs.slice(0, 5).map((dir) => (
+                  <button
+                    key={dir}
+                    type="button"
+                    onClick={() => navigatePane(activePane, dir)}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left cursor-pointer"
+                    style={{
+                      background: currentDir === dir ? "var(--surface-hover)" : "transparent",
+                      color: "var(--text-muted)",
+                    }}
+                    title={dir}
+                  >
+                    <Clock size={12} className="shrink-0 opacity-70" />
+                    <span className="truncate">{baseName(dir)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </aside>
 
         {/* Left & Optional Right Split Pane */}
@@ -1294,6 +1386,18 @@ export default function App() {
       />
 
       <PropertiesModal path={propertiesPath} onClose={() => setPropertiesPath(null)} />
+
+      <FolderCompareModal
+        open={compareOpen}
+        leftDir={activeLeftTab?.path || ""}
+        rightDir={rightPane.path}
+        onClose={() => setCompareOpen(false)}
+        onSynced={(msg) => {
+          triggerRefresh();
+          showToast(msg);
+        }}
+        onError={(msg) => showToast(msg, true)}
+      />
 
       <ContextMenu
         menu={contextMenu}

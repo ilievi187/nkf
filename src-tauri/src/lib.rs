@@ -97,6 +97,17 @@ pub struct TransferProgress {
 }
 
 #[derive(Serialize)]
+pub struct CompareItem {
+    pub name: String,
+    pub status: String, // "only_left" | "only_right" | "different" | "same"
+    pub left_path: Option<String>,
+    pub right_path: Option<String>,
+    pub left_size: u64,
+    pub right_size: u64,
+    pub is_dir: bool,
+}
+
+#[derive(Serialize)]
 pub struct OmarchyTheme {
     pub name: String,
     pub bg: String,
@@ -1623,6 +1634,73 @@ fn get_git_branch(dir: String) -> Option<String> {
     None
 }
 
+#[tauri::command]
+fn compare_folders(left_dir: String, right_dir: String) -> Result<Vec<CompareItem>, String> {
+    let left_entries = list_directory(left_dir, true)?;
+    let right_entries = list_directory(right_dir, true)?;
+
+    let mut left_map: HashMap<String, FileEntry> = HashMap::new();
+    for e in left_entries {
+        left_map.insert(e.name.clone(), e);
+    }
+    let mut right_map: HashMap<String, FileEntry> = HashMap::new();
+    for e in right_entries {
+        right_map.insert(e.name.clone(), e);
+    }
+
+    let mut all_names: Vec<String> = left_map
+        .keys()
+        .chain(right_map.keys())
+        .cloned()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    all_names.sort_by_key(|a| a.to_lowercase());
+
+    let mut items = Vec::new();
+    for name in all_names {
+        match (left_map.get(&name), right_map.get(&name)) {
+            (Some(l), None) => items.push(CompareItem {
+                name,
+                status: "only_left".to_string(),
+                left_path: Some(l.path.clone()),
+                right_path: None,
+                left_size: l.size,
+                right_size: 0,
+                is_dir: l.is_dir,
+            }),
+            (None, Some(r)) => items.push(CompareItem {
+                name,
+                status: "only_right".to_string(),
+                left_path: None,
+                right_path: Some(r.path.clone()),
+                left_size: 0,
+                right_size: r.size,
+                is_dir: r.is_dir,
+            }),
+            (Some(l), Some(r)) => {
+                let status = if l.is_dir != r.is_dir || (!l.is_dir && l.size != r.size) {
+                    "different"
+                } else {
+                    "same"
+                };
+                items.push(CompareItem {
+                    name,
+                    status: status.to_string(),
+                    left_path: Some(l.path.clone()),
+                    right_path: Some(r.path.clone()),
+                    left_size: l.size,
+                    right_size: r.size,
+                    is_dir: l.is_dir,
+                });
+            }
+            (None, None) => {}
+        }
+    }
+
+    Ok(items)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1640,6 +1718,7 @@ pub fn run() {
             get_file_properties,
             write_text_file,
             get_git_branch,
+            compare_folders,
             list_directory,
             read_preview,
             search_files,
@@ -1660,4 +1739,133 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running NKF");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_list_create_rename_and_hidden() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+
+        create_folder(root.clone(), "zeta_folder".into()).unwrap();
+        create_file(root.clone(), "alpha.txt".into()).unwrap();
+        create_file(root.clone(), ".secret".into()).unwrap();
+
+        let visible = list_directory(root.clone(), false).unwrap();
+        assert_eq!(visible.len(), 2);
+        // Directories must come before files
+        assert!(visible[0].is_dir);
+        assert_eq!(visible[0].name, "zeta_folder");
+        assert_eq!(visible[1].name, "alpha.txt");
+
+        let all = list_directory(root.clone(), true).unwrap();
+        assert_eq!(all.len(), 3);
+
+        let renamed = rename_item(visible[1].path.clone(), "beta.txt".into()).unwrap();
+        assert!(Path::new(&renamed).exists());
+    }
+
+    #[test]
+    fn test_batch_rename() {
+        let dir = tempdir().unwrap();
+        let p1 = create_file(dir.path().to_string_lossy().into(), "img_1.txt".into()).unwrap();
+        let p2 = create_file(dir.path().to_string_lossy().into(), "img_2.txt".into()).unwrap();
+
+        let count = batch_rename(vec![
+            (p1, "photo_001.txt".into()),
+            (p2, "photo_002.txt".into()),
+        ])
+        .unwrap();
+        assert_eq!(count, 2);
+        assert!(dir.path().join("photo_001.txt").exists());
+        assert!(dir.path().join("photo_002.txt").exists());
+    }
+
+    #[test]
+    fn test_zip_compress_and_extract_roundtrip() {
+        let dir = tempdir().unwrap();
+        let src_file = dir.path().join("hello.txt");
+        fs::write(&src_file, b"NightKnight Files ZIP test!").unwrap();
+
+        let zip_path = dir.path().join("test.zip").to_string_lossy().to_string();
+        compress_to_zip(vec![src_file.to_string_lossy().to_string()], zip_path.clone()).unwrap();
+        assert!(Path::new(&zip_path).exists());
+
+        let out_dir = dir.path().join("extracted");
+        let extracted = extract_zip(zip_path, out_dir.to_string_lossy().to_string()).unwrap();
+        assert_eq!(extracted, 1);
+        assert_eq!(
+            fs::read_to_string(out_dir.join("hello.txt")).unwrap(),
+            "NightKnight Files ZIP test!"
+        );
+    }
+
+    #[test]
+    fn test_find_duplicates_sha256() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.bin"), b"duplicate payload 12345").unwrap();
+        fs::write(dir.path().join("b.bin"), b"duplicate payload 12345").unwrap();
+        fs::write(dir.path().join("unique.bin"), b"totally different").unwrap();
+
+        let groups = find_duplicates(dir.path().to_string_lossy().to_string()).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].files.len(), 2);
+        assert_eq!(groups[0].wasted_bytes, 23);
+    }
+
+    #[test]
+    fn test_disk_usage_and_properties_and_quick_edit() {
+        let dir = tempdir().unwrap();
+        let f = dir.path().join("notes.md");
+        write_text_file(f.to_string_lossy().to_string(), "# NKF Rocks".into()).unwrap();
+
+        let preview = read_preview(f.to_string_lossy().to_string()).unwrap();
+        assert_eq!(preview.kind, "text");
+        assert_eq!(preview.content, "# NKF Rocks");
+
+        let props = get_file_properties(f.to_string_lossy().to_string(), true).unwrap();
+        assert_eq!(props.size, 11);
+        assert!(props.sha256.is_some());
+        assert_eq!(props.sha256.unwrap().len(), 64);
+
+        let usage = compute_folder_sizes(dir.path().to_string_lossy().to_string()).unwrap();
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].size, 11);
+    }
+
+    #[test]
+    fn test_compare_folders_and_git_branch() {
+        let d1 = tempdir().unwrap();
+        let d2 = tempdir().unwrap();
+        fs::write(d1.path().join("shared.txt"), b"same").unwrap();
+        fs::write(d2.path().join("shared.txt"), b"same").unwrap();
+        fs::write(d1.path().join("diff.txt"), b"short").unwrap();
+        fs::write(d2.path().join("diff.txt"), b"much longer").unwrap();
+        fs::write(d1.path().join("left_only.txt"), b"L").unwrap();
+        fs::write(d2.path().join("right_only.txt"), b"R").unwrap();
+
+        let diff = compare_folders(
+            d1.path().to_string_lossy().to_string(),
+            d2.path().to_string_lossy().to_string(),
+        )
+        .unwrap();
+        let map: HashMap<String, String> = diff.into_iter().map(|i| (i.name, i.status)).collect();
+        assert_eq!(map.get("shared.txt").map(String::as_str), Some("same"));
+        assert_eq!(map.get("diff.txt").map(String::as_str), Some("different"));
+        assert_eq!(map.get("left_only.txt").map(String::as_str), Some("only_left"));
+        assert_eq!(map.get("right_only.txt").map(String::as_str), Some("only_right"));
+
+        // Test git branch detection
+        let git_dir = d1.path().join(".git");
+        fs::create_dir(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/nkf\n").unwrap();
+        assert_eq!(
+            get_git_branch(d1.path().to_string_lossy().to_string()),
+            Some("feature/nkf".to_string())
+        );
+    }
 }
