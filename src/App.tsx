@@ -38,6 +38,7 @@ import {
   GitCompareArrows,
   Clock,
   FileDiff,
+  User,
 } from "lucide-react";
 import { BUILTIN_THEMES, applyThemeToRoot, type ThemeDefinition } from "./lib/themes";
 import {
@@ -49,7 +50,7 @@ import {
   type PlaceItem,
   type TransferProgress,
 } from "./lib/api";
-import { FilePane, type ViewMode } from "./components/FilePane";
+import { FilePane, type IconSet, type ViewMode } from "./components/FilePane";
 import { QuickLookModal } from "./components/QuickLookModal";
 import { BatchRenameModal } from "./components/BatchRenameModal";
 import { DiskUsageModal } from "./components/DiskUsageModal";
@@ -106,15 +107,22 @@ function baseName(p: string): string {
 }
 
 export default function App() {
-  // Themes
+  // Themes & Icon Sets (default: Auto Adaptive)
   const [omarchyTheme, setOmarchyTheme] = useState<ThemeDefinition | null>(null);
   const [themeId, setThemeId] = useState<string>(
-    () => localStorage.getItem("nkf_theme") || "nightknight"
+    () => localStorage.getItem("nkf_theme") || "auto"
+  );
+  const [iconSet, setIconSet] = useState<IconSet>(
+    () => (localStorage.getItem("nkf_icon_set") as IconSet) || "native"
+  );
+  const [systemDark, setSystemDark] = useState<boolean>(() =>
+    window.matchMedia("(prefers-color-scheme: dark)").matches
   );
   const [showThemeMenu, setShowThemeMenu] = useState(false);
 
   // Places, Network Shares & Bookmarks
   const [platform, setPlatform] = useState<string>("linux");
+  const [username, setUsername] = useState<string>("");
   const [places, setPlaces] = useState<PlaceItem[]>([]);
   const [networkShares, setNetworkShares] = useState<NetworkShareItem[]>([]);
   const [savedShares, setSavedShares] = useState<NetworkShareItem[]>(() => {
@@ -198,13 +206,11 @@ export default function App() {
   // Boot: initial dir, places, network shares, Omarchy theme
   useEffect(() => {
     nkfApi.getPlatform().then(setPlatform).catch(() => {});
+    nkfApi.getUsername().then(setUsername).catch(() => {});
     nkfApi.getSystemPlaces().then(setPlaces).catch(() => {});
     refreshNetworkShares();
     nkfApi.getOmarchyTheme().then((t) => {
-      if (t) {
-        setOmarchyTheme(t);
-        if (!localStorage.getItem("nkf_theme")) setThemeId("omarchy");
-      }
+      if (t) setOmarchyTheme(t);
     });
     nkfApi.getInitialDir().then((dir) => {
       const id = crypto.randomUUID();
@@ -214,12 +220,35 @@ export default function App() {
     });
   }, []);
 
-  // Apply theme
+  // Listen to OS dark/light mode changes for Adaptive Auto theme
   useEffect(() => {
-    const found = allThemes.find((t) => t.id === themeId) || BUILTIN_THEMES[0];
-    applyThemeToRoot(found);
-    localStorage.setItem("nkf_theme", found.id);
-  }, [themeId, allThemes]);
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = (e: MediaQueryListEvent) => setSystemDark(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  // Apply theme (Auto adapts to Omarchy on Linux or OS Dark/Light on Windows/macOS)
+  useEffect(() => {
+    let resolved: ThemeDefinition;
+    if (themeId === "auto") {
+      if (omarchyTheme) {
+        resolved = omarchyTheme;
+      } else {
+        resolved =
+          BUILTIN_THEMES.find((t) => t.id === (systemDark ? "nightknight" : "paper")) ||
+          BUILTIN_THEMES[0];
+      }
+    } else {
+      resolved = allThemes.find((t) => t.id === themeId) || BUILTIN_THEMES[0];
+    }
+    applyThemeToRoot(resolved);
+    localStorage.setItem("nkf_theme", themeId);
+  }, [themeId, allThemes, omarchyTheme, systemDark]);
+
+  useEffect(() => {
+    localStorage.setItem("nkf_icon_set", iconSet);
+  }, [iconSet]);
 
   // Listen for streaming copy/move transfer progress + auto-refresh on window focus
   useEffect(() => {
@@ -233,7 +262,12 @@ export default function App() {
       })
       .catch(() => {});
 
-    const onFocus = () => setRefreshTick((t) => t + 1);
+    const onFocus = () => {
+      setRefreshTick((t) => t + 1);
+      nkfApi.getOmarchyTheme().then((t) => {
+        if (t) setOmarchyTheme(t);
+      });
+    };
     window.addEventListener("focus", onFocus);
     return () => {
       unlisten?.();
@@ -610,12 +644,15 @@ export default function App() {
             NK
           </div>
           <span className="font-bold text-sm tracking-tight">NKF</span>
-          <span
-            className="text-[11px] px-2 py-0.5 rounded-full hidden md:inline"
-            style={{ background: "var(--surface-alt)", color: "var(--text-muted)" }}
-          >
-            NightKnight Files
-          </span>
+          {username && (
+            <span
+              className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full hidden md:inline-flex"
+              style={{ background: "var(--surface-alt)", color: "var(--text-muted)" }}
+              title={`Signed in as ${username}`}
+            >
+              <User size={11} /> {username}
+            </span>
+          )}
         </div>
 
         {/* Center Dolphin-style Action Bar */}
@@ -886,15 +923,38 @@ export default function App() {
             </button>
             {showThemeMenu && (
               <div
-                className="absolute right-0 mt-2 w-52 rounded-xl border shadow-2xl p-1.5 z-50"
+                className="absolute right-0 mt-2 w-56 rounded-xl border shadow-2xl p-1.5 z-50 space-y-1"
                 style={{ background: "var(--surface)", borderColor: "var(--border)" }}
               >
                 <div
-                  className="px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider"
+                  className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider"
                   style={{ color: "var(--text-muted)" }}
                 >
-                  Themes
+                  Theme
                 </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setThemeId("auto");
+                    setShowThemeMenu(false);
+                  }}
+                  className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left cursor-pointer"
+                  style={{
+                    background: themeId === "auto" ? "var(--surface-hover)" : "transparent",
+                  }}
+                >
+                  <span className="flex items-center gap-2">
+                    <span
+                      className="w-3.5 h-3.5 rounded-full border"
+                      style={{
+                        background: "linear-gradient(135deg, #0c0e14 50%, #f4f6fa 50%)",
+                        borderColor: "var(--border)",
+                      }}
+                    />
+                    Auto (Adaptive)
+                  </span>
+                  {themeId === "auto" && <Check size={13} />}
+                </button>
                 {allThemes.map((t) => (
                   <button
                     key={t.id}
@@ -916,6 +976,38 @@ export default function App() {
                       {t.name}
                     </span>
                     {themeId === t.id && <Check size={13} />}
+                  </button>
+                ))}
+
+                <div className="my-1 border-t" style={{ borderColor: "var(--border)" }} />
+                <div
+                  className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  Icon Set
+                </div>
+                {(
+                  [
+                    { id: "native", label: "System / Native" },
+                    { id: "classic", label: "Classic Gold" },
+                    { id: "vibrant", label: "Vibrant Modern" },
+                    { id: "minimal", label: "Minimal Mono" },
+                  ] as { id: IconSet; label: string }[]
+                ).map((set) => (
+                  <button
+                    key={set.id}
+                    type="button"
+                    onClick={() => {
+                      setIconSet(set.id);
+                      setShowThemeMenu(false);
+                    }}
+                    className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left cursor-pointer"
+                    style={{
+                      background: iconSet === set.id ? "var(--surface-hover)" : "transparent",
+                    }}
+                  >
+                    <span>{set.label}</span>
+                    {iconSet === set.id && <Check size={13} />}
                   </button>
                 ))}
               </div>
@@ -1159,6 +1251,7 @@ export default function App() {
               historyIdx={activeLeftTab.historyIdx}
               showHidden={showHidden}
               viewMode={viewMode}
+              iconSet={iconSet}
               refreshTick={refreshTick}
               selectedPaths={leftSel}
               onFocus={() => setActivePane("left")}
@@ -1191,6 +1284,7 @@ export default function App() {
               historyIdx={rightPane.historyIdx}
               showHidden={showHidden}
               viewMode={viewMode}
+              iconSet={iconSet}
               refreshTick={refreshTick}
               selectedPaths={rightSel}
               onFocus={() => setActivePane("right")}

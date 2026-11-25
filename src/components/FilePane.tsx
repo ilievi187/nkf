@@ -34,6 +34,7 @@ import {
 } from "../lib/api";
 
 export type ViewMode = "list" | "grid";
+export type IconSet = "native" | "vibrant" | "classic" | "minimal";
 type SortKey = "name" | "size" | "modified";
 
 interface FilePaneProps {
@@ -44,6 +45,7 @@ interface FilePaneProps {
   historyIdx: number;
   showHidden: boolean;
   viewMode: ViewMode;
+  iconSet: IconSet;
   refreshTick: number;
   selectedPaths: Set<string>;
   onFocus: () => void;
@@ -58,31 +60,63 @@ interface FilePaneProps {
   onRefresh: () => void;
 }
 
-export function renderFileIcon(entry: FileEntry, size = 18) {
-  if (entry.is_dir) return <Folder size={size} style={{ color: "var(--accent)" }} fill="currentColor" fillOpacity={0.2} />;
+export function renderFileIcon(entry: FileEntry, size = 18, iconSet: IconSet = "native") {
+  if (iconSet === "minimal") {
+    if (entry.is_dir) return <Folder size={size} style={{ color: "var(--text)" }} />;
+    const ext = entry.extension;
+    if (["png", "jpg", "jpeg", "webp", "gif", "svg", "bmp", "ico"].includes(ext))
+      return <FileImage size={size} style={{ color: "var(--text-muted)" }} />;
+    if (["mp4", "mkv", "webm", "avi", "mov"].includes(ext))
+      return <FileVideo size={size} style={{ color: "var(--text-muted)" }} />;
+    if (["mp3", "wav", "flac", "ogg", "m4a"].includes(ext))
+      return <FileAudio size={size} style={{ color: "var(--text-muted)" }} />;
+    if (["zip", "tar", "gz", "7z", "rar", "xz", "zst"].includes(ext))
+      return <FileArchive size={size} style={{ color: "var(--text-muted)" }} />;
+    if (["rs", "ts", "tsx", "js", "jsx", "py", "go", "c", "cpp", "json", "toml", "yaml", "html", "css", "sh"].includes(ext))
+      return <FileCode size={size} style={{ color: "var(--text-muted)" }} />;
+    if (["pdf", "md", "txt", "doc", "docx", "odt"].includes(ext))
+      return <FileText size={size} style={{ color: "var(--text-muted)" }} />;
+    return <FileIcon size={size} style={{ color: "var(--text-muted)" }} />;
+  }
+
+  if (entry.is_dir) {
+    if (iconSet === "classic") {
+      return <Folder size={size} color="#f59e0b" fill="#fbbf24" fillOpacity={0.85} />;
+    }
+    if (iconSet === "vibrant") {
+      return <Folder size={size} color="#38bdf8" fill="#38bdf8" fillOpacity={0.45} />;
+    }
+    return <Folder size={size} style={{ color: "var(--accent)" }} fill="currentColor" fillOpacity={0.22} />;
+  }
+
   const ext = entry.extension;
   if (["png", "jpg", "jpeg", "webp", "gif", "svg", "bmp", "ico"].includes(ext))
-    return <FileImage size={size} className="text-emerald-400" />;
+    return <FileImage size={size} className={iconSet === "vibrant" ? "text-emerald-500" : "text-emerald-400"} />;
   if (["mp4", "mkv", "webm", "avi", "mov"].includes(ext))
-    return <FileVideo size={size} className="text-pink-400" />;
+    return <FileVideo size={size} className={iconSet === "vibrant" ? "text-rose-500" : "text-pink-400"} />;
   if (["mp3", "wav", "flac", "ogg", "m4a"].includes(ext))
-    return <FileAudio size={size} className="text-amber-400" />;
+    return <FileAudio size={size} className="text-amber-500" />;
   if (["zip", "tar", "gz", "7z", "rar", "xz", "zst"].includes(ext))
-    return <FileArchive size={size} className="text-orange-400" />;
+    return <FileArchive size={size} className="text-orange-500" />;
   if (["rs", "ts", "tsx", "js", "jsx", "py", "go", "c", "cpp", "json", "toml", "yaml", "html", "css", "sh"].includes(ext))
-    return <FileCode size={size} className="text-sky-400" />;
+    return <FileCode size={size} className="text-sky-500" />;
   if (["pdf", "md", "txt", "doc", "docx", "odt"].includes(ext))
-    return <FileText size={size} className="text-indigo-300" />;
+    return <FileText size={size} className={iconSet === "classic" ? "text-blue-500" : "text-indigo-400"} />;
   return <FileIcon size={size} style={{ color: "var(--text-muted)" }} />;
 }
 
-export const NativeFileIcon: React.FC<{ entry: FileEntry; size?: number }> = ({
-  entry,
-  size = 18,
-}) => {
+export const NativeFileIcon: React.FC<{
+  entry: FileEntry;
+  size?: number;
+  iconSet?: IconSet;
+}> = ({ entry, size = 18, iconSet = "native" }) => {
   const [nativeUrl, setNativeUrl] = useState<string | null>(null);
 
   useEffect(() => {
+    if (iconSet !== "native") {
+      setNativeUrl(null);
+      return;
+    }
     let active = true;
     getCachedNativeIcon(entry).then((url) => {
       if (active && url) setNativeUrl(url);
@@ -90,9 +124,9 @@ export const NativeFileIcon: React.FC<{ entry: FileEntry; size?: number }> = ({
     return () => {
       active = false;
     };
-  }, [entry.path, entry.is_dir, entry.extension]);
+  }, [entry.path, entry.is_dir, entry.extension, iconSet]);
 
-  if (nativeUrl) {
+  if (iconSet === "native" && nativeUrl) {
     return (
       <img
         src={nativeUrl}
@@ -105,10 +139,10 @@ export const NativeFileIcon: React.FC<{ entry: FileEntry; size?: number }> = ({
       />
     );
   }
-  return renderFileIcon(entry, size);
+  return renderFileIcon(entry, size, iconSet);
 };
 
-const GridThumbnail: React.FC<{ entry: FileEntry }> = ({ entry }) => {
+const GridThumbnail: React.FC<{ entry: FileEntry; iconSet: IconSet }> = ({ entry, iconSet }) => {
   const [thumb, setThumb] = useState<string | null>(null);
   const holderRef = useRef<HTMLDivElement>(null);
   const canThumb = isPreviewableImage(entry);
@@ -148,7 +182,7 @@ const GridThumbnail: React.FC<{ entry: FileEntry }> = ({ entry }) => {
           className="w-full h-full object-cover rounded-lg"
         />
       ) : (
-        <NativeFileIcon entry={entry} size={36} />
+        <NativeFileIcon entry={entry} size={36} iconSet={iconSet} />
       )}
     </div>
   );
@@ -161,6 +195,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
   historyIdx,
   showHidden,
   viewMode,
+  iconSet,
   refreshTick,
   selectedPaths,
   onFocus,
@@ -573,7 +608,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
                     <td className="py-1.5 px-3">
                       <div className="flex items-center gap-2.5 min-w-0">
                         <span className="shrink-0">
-                          <NativeFileIcon entry={entry} size={18} />
+                          <NativeFileIcon entry={entry} size={18} iconSet={iconSet} />
                         </span>
                         <span className={`truncate ${entry.is_hidden ? "opacity-60" : ""}`}>
                           {entry.name}
@@ -636,7 +671,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
                     borderColor: isSel || dropHoverPath === entry.path ? "var(--accent)" : "var(--border)",
                   }}
                 >
-                  <GridThumbnail entry={entry} />
+                  <GridThumbnail entry={entry} iconSet={iconSet} />
                   <span className="text-xs w-full truncate font-medium">{entry.name}</span>
                   <span className="text-[10px] font-mono" style={{ color: "var(--text-muted)" }}>
                     {entry.is_dir ? "Folder" : fmtBytes(entry.size)}

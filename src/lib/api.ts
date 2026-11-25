@@ -212,6 +212,7 @@ export function getCachedImageThumb(path: string): Promise<string | null> {
 
 export const nkfApi = {
   getPlatform: () => invoke<string>("get_platform"),
+  getUsername: () => invoke<string>("get_username"),
   getInitialDir: () => invoke<string>("get_initial_dir"),
   getSystemPlaces: () => invoke<PlaceItem[]>("get_system_places"),
   getNetworkShares: () => invoke<NetworkShareItem[]>("get_network_shares"),

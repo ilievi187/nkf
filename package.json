@@ -1,7 +1,7 @@
 {
   "name": "nkf",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "NKF (NightKnight Files) — Fast, modern, dual-pane FOSS File Manager built with Rust & Tauri v2",
   "type": "module",
   "scripts": {

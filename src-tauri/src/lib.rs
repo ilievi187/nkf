@@ -163,6 +163,13 @@ fn get_platform() -> String {
 }
 
 #[tauri::command]
+fn get_username() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "user".to_string())
+}
+
+#[tauri::command]
 fn get_initial_dir() -> String {
     if let Some(arg) = std::env::args().skip(1).find(|a| !a.starts_with('-')) {
         let p = PathBuf::from(&arg);
@@ -1707,6 +1714,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_platform,
+            get_username,
             get_initial_dir,
             get_system_places,
             get_network_shares,
