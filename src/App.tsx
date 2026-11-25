@@ -37,6 +37,7 @@ import {
   Command,
   GitCompareArrows,
   Clock,
+  FileDiff,
 } from "lucide-react";
 import { BUILTIN_THEMES, applyThemeToRoot, type ThemeDefinition } from "./lib/themes";
 import {
@@ -58,6 +59,7 @@ import { PropertiesModal } from "./components/PropertiesModal";
 import { ContextMenu, type ContextMenuState } from "./components/ContextMenu";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { FolderCompareModal } from "./components/FolderCompareModal";
+import { DiffEditorModal } from "./components/DiffEditorModal";
 
 interface TabState {
   id: string;
@@ -171,6 +173,7 @@ export default function App() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
+  const [diffPair, setDiffPair] = useState<[string, string] | null>(null);
   const [transfer, setTransfer] = useState<TransferProgress | null>(null);
 
   // Toast
@@ -247,6 +250,20 @@ export default function App() {
     () => activeEntries.filter((e) => activeSel.has(e.path)),
     [activeEntries, activeSel]
   );
+
+  // Detect 2 selected files for Side-by-Side Diff & Live Editor (either 2 in active pane, or 1 left + 1 right)
+  const diffCandidates = useMemo<[string, string] | null>(() => {
+    const activeFiles = selectedEntries.filter((e) => !e.is_dir);
+    if (activeFiles.length === 2) {
+      return [activeFiles[0].path, activeFiles[1].path];
+    }
+    if (splitMode) {
+      const lf = leftEntries.find((e) => !e.is_dir && leftSel.has(e.path));
+      const rf = rightEntries.find((e) => !e.is_dir && rightSel.has(e.path));
+      if (lf && rf) return [lf.path, rf.path];
+    }
+    return null;
+  }, [selectedEntries, splitMode, leftEntries, rightEntries, leftSel, rightSel]);
 
   const triggerRefresh = useCallback(() => {
     setRefreshTick((t) => t + 1);
@@ -679,6 +696,18 @@ export default function App() {
           >
             <ClipboardPaste size={15} />
           </button>
+
+          {diffCandidates && (
+            <button
+              type="button"
+              onClick={() => setDiffPair(diffCandidates)}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold cursor-pointer shrink-0"
+              style={{ background: "var(--accent)", color: "var(--accent-text)" }}
+              title="Open 2 selected files in Side-by-Side Diff & Live Editor"
+            >
+              <FileDiff size={13} /> Diff / Edit
+            </button>
+          )}
 
           {splitMode && (
             <button
@@ -1396,12 +1425,26 @@ export default function App() {
           triggerRefresh();
           showToast(msg);
         }}
+        onOpenDiff={(l, r) => setDiffPair([l, r])}
+        onError={(msg) => showToast(msg, true)}
+      />
+
+      <DiffEditorModal
+        open={Boolean(diffPair)}
+        leftPath={diffPair?.[0] ?? null}
+        rightPath={diffPair?.[1] ?? null}
+        onClose={() => setDiffPair(null)}
+        onSaved={(msg) => {
+          triggerRefresh();
+          showToast(msg);
+        }}
         onError={(msg) => showToast(msg, true)}
       />
 
       <ContextMenu
         menu={contextMenu}
         selectedCount={activeSel.size}
+        canDiff={Boolean(diffCandidates)}
         hasClipboard={Boolean(clipboard)}
         onClose={() => setContextMenu(null)}
         onOpen={(entry) => {
@@ -1409,6 +1452,7 @@ export default function App() {
           else nkfApi.openWithDefault(entry.path).catch((e) => showToast(String(e), true));
         }}
         onQuickLook={setQuickLookEntry}
+        onDiff={() => diffCandidates && setDiffPair(diffCandidates)}
         onCopy={handleCopy}
         onCut={handleCut}
         onPaste={handlePaste}

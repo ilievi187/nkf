@@ -13,6 +13,7 @@ import {
   Terminal,
   Trash2,
   Link2,
+  FileDiff,
 } from "lucide-react";
 import type { FileEntry } from "../lib/api";
 
@@ -25,10 +26,12 @@ export interface ContextMenuState {
 interface ContextMenuProps {
   menu: ContextMenuState | null;
   selectedCount: number;
+  canDiff: boolean;
   hasClipboard: boolean;
   onClose: () => void;
   onOpen: (entry: FileEntry) => void;
   onQuickLook: (entry: FileEntry) => void;
+  onDiff: () => void;
   onCopy: () => void;
   onCut: () => void;
   onPaste: () => void;
@@ -45,10 +48,12 @@ interface ContextMenuProps {
 export const ContextMenu: React.FC<ContextMenuProps> = ({
   menu,
   selectedCount,
+  canDiff,
   hasClipboard,
   onClose,
   onOpen,
   onQuickLook,
+  onDiff,
   onCopy,
   onCut,
   onPaste,
@@ -118,6 +123,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
         <>
           {itemBtn("Open", <ExternalLink size={14} />, () => onOpen(e))}
           {itemBtn("Quick Look (Space)", <Eye size={14} />, () => onQuickLook(e))}
+          {canDiff && itemBtn("Diff / Dual Edit (2 files)", <FileDiff size={14} />, onDiff)}
           <div className="my-1 border-t" style={{ borderColor: "var(--border)" }} />
           {itemBtn("Copy", <Copy size={14} />, onCopy)}
           {itemBtn("Cut", <Scissors size={14} />, onCut)}

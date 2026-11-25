@@ -9,6 +9,7 @@ interface FolderCompareModalProps {
   rightDir: string;
   onClose: () => void;
   onSynced: (msg: string) => void;
+  onOpenDiff: (leftPath: string, rightPath: string) => void;
   onError: (msg: string) => void;
 }
 
@@ -18,6 +19,7 @@ export const FolderCompareModal: React.FC<FolderCompareModalProps> = ({
   rightDir,
   onClose,
   onSynced,
+  onOpenDiff,
   onError,
 }) => {
   const [items, setItems] = useState<CompareItem[]>([]);
@@ -134,9 +136,24 @@ export const FolderCompareModal: React.FC<FolderCompareModalProps> = ({
                       </span>
                     )}
                     {it.status === "different" && (
-                      <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300">
-                        {fmtBytes(it.left_size)} ≠ {fmtBytes(it.right_size)}
-                      </span>
+                      <>
+                        <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300">
+                          {fmtBytes(it.left_size)} ≠ {fmtBytes(it.right_size)}
+                        </span>
+                        {!it.is_dir && it.left_path && it.right_path && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onClose();
+                              onOpenDiff(it.left_path!, it.right_path!);
+                            }}
+                            className="px-2 py-0.5 rounded font-sans font-semibold cursor-pointer"
+                            style={{ background: "var(--accent)", color: "var(--accent-text)" }}
+                          >
+                            Diff / Edit
+                          </button>
+                        )}
+                      </>
                     )}
                     {it.status === "same" && (
                       <span style={{ color: "var(--text-muted)" }}>Identical</span>
