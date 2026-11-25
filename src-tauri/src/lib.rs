@@ -619,17 +619,20 @@ fn extract_windows_icon_data_url(path: &str, is_dir: bool, ext: &str) -> Option<
                 }
 
                 let mut png_buf = Vec::new();
+                let mut encoded_ok = false;
                 {
                     let mut encoder = png::Encoder::new(&mut png_buf, w, h);
                     encoder.set_color(png::ColorType::Rgba);
                     encoder.set_depth(png::BitDepth::Eight);
                     if let Ok(mut writer) = encoder.write_header() {
                         if writer.write_image_data(&pixels).is_ok() {
-                            drop(writer);
-                            let b64 = base64::engine::general_purpose::STANDARD.encode(&png_buf);
-                            result_url = Some(format!("data:image/png;base64,{}", b64));
+                            encoded_ok = true;
                         }
                     }
+                }
+                if encoded_ok {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_buf);
+                    result_url = Some(format!("data:image/png;base64,{}", b64));
                 }
             }
         }
