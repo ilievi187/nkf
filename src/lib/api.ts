@@ -18,6 +18,13 @@ export interface PlaceItem {
   kind: string;
 }
 
+export interface NetworkShareItem {
+  name: string;
+  path: string;
+  remote: string;
+  kind: string;
+}
+
 export interface PreviewData {
   kind: "text" | "image" | "binary" | "dir";
   mime: string;
@@ -56,6 +63,12 @@ export function fmtDate(ms: number): string {
 
 export function getParentPath(path: string): string {
   if (!path || path === "/") return "/";
+  // Windows UNC path: \\server\share\sub -> \\server\share
+  if (path.startsWith("\\\\")) {
+    const parts = path.slice(2).split("\\").filter(Boolean);
+    if (parts.length <= 2) return `\\\\${parts.join("\\")}`;
+    return `\\\\${parts.slice(0, -1).join("\\")}`;
+  }
   const isWin = /^[A-Za-z]:\\/.test(path);
   const sep = isWin ? "\\" : "/";
   const trimmed = path.endsWith(sep) && path.length > (isWin ? 3 : 1) ? path.slice(0, -1) : path;
@@ -67,6 +80,23 @@ export function getParentPath(path: string): string {
 
 export function splitBreadcrumbs(path: string): { label: string; fullPath: string }[] {
   if (!path) return [];
+  // Windows UNC path: \\server\share\dir
+  if (path.startsWith("\\\\")) {
+    const parts = path.slice(2).split("\\").filter(Boolean);
+    if (parts.length === 0) return [];
+    if (parts.length === 1) {
+      return [{ label: `\\\\${parts[0]}`, fullPath: `\\\\${parts[0]}` }];
+    }
+    const rootShare = `\\\\${parts[0]}\\${parts[1]}`;
+    const crumbs = [{ label: rootShare, fullPath: rootShare }];
+    for (let i = 2; i < parts.length; i++) {
+      crumbs.push({
+        label: parts[i],
+        fullPath: `${rootShare}\\${parts.slice(2, i + 1).join("\\")}`,
+      });
+    }
+    return crumbs;
+  }
   const isWin = /^[A-Za-z]:\\/.test(path);
   if (isWin) {
     const parts = path.split("\\").filter(Boolean);
@@ -86,9 +116,58 @@ export function splitBreadcrumbs(path: string): { label: string; fullPath: strin
   return crumbs;
 }
 
+const nativeIconCache = new Map<string, string | null>();
+const nativeIconPending = new Map<string, Promise<string | null>>();
+
+export function getCachedNativeIcon(entry: FileEntry): Promise<string | null> {
+  const ext = entry.extension.toLowerCase();
+  const unique = !entry.is_dir && ["exe", "lnk", "ico", "url", "cur"].includes(ext);
+  const key = unique ? `path:${entry.path}` : entry.is_dir ? "dir" : `ext:${ext}`;
+
+  if (nativeIconCache.has(key)) {
+    return Promise.resolve(nativeIconCache.get(key) ?? null);
+  }
+  const existing = nativeIconPending.get(key);
+  if (existing) return existing;
+
+  const p = invoke<string | null>("get_native_icon", {
+    path: entry.path,
+    isDir: entry.is_dir,
+    extension: ext,
+  })
+    .then((res) => {
+      nativeIconCache.set(key, res);
+      nativeIconPending.delete(key);
+      return res;
+    })
+    .catch(() => {
+      nativeIconCache.set(key, null);
+      nativeIconPending.delete(key);
+      return null;
+    });
+  nativeIconPending.set(key, p);
+  return p;
+}
+
 export const nkfApi = {
+  getPlatform: () => invoke<string>("get_platform"),
   getInitialDir: () => invoke<string>("get_initial_dir"),
   getSystemPlaces: () => invoke<PlaceItem[]>("get_system_places"),
+  getNetworkShares: () => invoke<NetworkShareItem[]>("get_network_shares"),
+  connectNetworkShare: (
+    sharePath: string,
+    username: string,
+    password: string,
+    driveLetter: string
+  ) =>
+    invoke<string>("connect_network_share", {
+      sharePath,
+      username,
+      password,
+      driveLetter,
+    }),
+  disconnectNetworkShare: (target: string) =>
+    invoke<void>("disconnect_network_share", { target }),
   listDirectory: (path: string, showHidden: boolean) =>
     invoke<FileEntry[]>("list_directory", { path, showHidden }),
   readPreview: (path: string) => invoke<PreviewData>("read_preview", { path }),

@@ -23,6 +23,7 @@ import {
 import {
   fmtBytes,
   fmtDate,
+  getCachedNativeIcon,
   getParentPath,
   nkfApi,
   splitBreadcrumbs,
@@ -70,6 +71,38 @@ export function renderFileIcon(entry: FileEntry, size = 18) {
     return <FileText size={size} className="text-indigo-300" />;
   return <FileIcon size={size} style={{ color: "var(--text-muted)" }} />;
 }
+
+export const NativeFileIcon: React.FC<{ entry: FileEntry; size?: number }> = ({
+  entry,
+  size = 18,
+}) => {
+  const [nativeUrl, setNativeUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    getCachedNativeIcon(entry).then((url) => {
+      if (active && url) setNativeUrl(url);
+    });
+    return () => {
+      active = false;
+    };
+  }, [entry.path, entry.is_dir, entry.extension]);
+
+  if (nativeUrl) {
+    return (
+      <img
+        src={nativeUrl}
+        alt=""
+        width={size}
+        height={size}
+        draggable={false}
+        className="object-contain shrink-0 block"
+        style={{ width: size, height: size }}
+      />
+    );
+  }
+  return renderFileIcon(entry, size);
+};
 
 export const FilePane: React.FC<FilePaneProps> = ({
   isActive,
@@ -415,7 +448,9 @@ export const FilePane: React.FC<FilePaneProps> = ({
                   >
                     <td className="py-1.5 px-3">
                       <div className="flex items-center gap-2.5 min-w-0">
-                        <span className="shrink-0">{renderFileIcon(entry, 16)}</span>
+                        <span className="shrink-0">
+                          <NativeFileIcon entry={entry} size={18} />
+                        </span>
                         <span className={`truncate ${entry.is_hidden ? "opacity-60" : ""}`}>
                           {entry.name}
                         </span>
@@ -450,7 +485,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
                     borderColor: isSel ? "var(--accent)" : "var(--border)",
                   }}
                 >
-                  {renderFileIcon(entry, 34)}
+                  <NativeFileIcon entry={entry} size={36} />
                   <span className="text-xs w-full truncate font-medium">{entry.name}</span>
                   <span className="text-[10px] font-mono" style={{ color: "var(--text-muted)" }}>
                     {entry.is_dir ? "Folder" : fmtBytes(entry.size)}

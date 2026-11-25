@@ -1,6 +1,6 @@
 [package]
 name = "nkf"
-version = "0.1.0"
+version = "0.2.0"
 description = "NKF (NightKnight Files) — Fast, modern, dual-pane FOSS File Manager"
 authors = ["NightKnight Contributors"]
 license = "MIT"
@@ -23,6 +23,16 @@ walkdir = "2"
 trash = "5"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+png = "0.17"
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Graphics_Gdi",
+  "Win32_Storage_FileSystem",
+] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

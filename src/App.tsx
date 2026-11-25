@@ -30,13 +30,16 @@ import {
   Coffee,
   ArrowRightLeft,
   Sparkles,
+  Network,
+  RefreshCw,
 } from "lucide-react";
 import { BUILTIN_THEMES, applyThemeToRoot, type ThemeDefinition } from "./lib/themes";
-import { nkfApi, type FileEntry, type PlaceItem } from "./lib/api";
+import { nkfApi, type FileEntry, type NetworkShareItem, type PlaceItem } from "./lib/api";
 import { FilePane, type ViewMode } from "./components/FilePane";
 import { QuickLookModal } from "./components/QuickLookModal";
 import { BatchRenameModal } from "./components/BatchRenameModal";
 import { DiskUsageModal } from "./components/DiskUsageModal";
+import { NetworkShareModal } from "./components/NetworkShareModal";
 
 interface TabState {
   id: string;
@@ -51,6 +54,7 @@ interface ClipboardState {
 }
 
 const BOOKMARKS_KEY = "nkf_bookmarks";
+const SAVED_SHARES_KEY = "nkf_saved_shares";
 
 function placeIcon(kind: string) {
   switch (kind) {
@@ -88,8 +92,17 @@ export default function App() {
   );
   const [showThemeMenu, setShowThemeMenu] = useState(false);
 
-  // Places & Bookmarks
+  // Places, Network Shares & Bookmarks
+  const [platform, setPlatform] = useState<string>("linux");
   const [places, setPlaces] = useState<PlaceItem[]>([]);
+  const [networkShares, setNetworkShares] = useState<NetworkShareItem[]>([]);
+  const [savedShares, setSavedShares] = useState<NetworkShareItem[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(SAVED_SHARES_KEY) || "[]");
+    } catch {
+      return [];
+    }
+  });
   const [bookmarks, setBookmarks] = useState<string[]>(() => {
     try {
       return JSON.parse(localStorage.getItem(BOOKMARKS_KEY) || "[]");
@@ -126,6 +139,7 @@ export default function App() {
   const [quickLookEntry, setQuickLookEntry] = useState<FileEntry | null>(null);
   const [batchRenameOpen, setBatchRenameOpen] = useState(false);
   const [diskUsageOpen, setDiskUsageOpen] = useState(false);
+  const [networkModalOpen, setNetworkModalOpen] = useState(false);
 
   // Toast
   const [toast, setToast] = useState<{ msg: string; isError?: boolean } | null>(null);
@@ -142,9 +156,15 @@ export default function App() {
     [omarchyTheme]
   );
 
-  // Boot: initial dir, places, Omarchy theme
+  const refreshNetworkShares = useCallback(() => {
+    nkfApi.getNetworkShares().then(setNetworkShares).catch(() => {});
+  }, []);
+
+  // Boot: initial dir, places, network shares, Omarchy theme
   useEffect(() => {
+    nkfApi.getPlatform().then(setPlatform).catch(() => {});
     nkfApi.getSystemPlaces().then(setPlaces).catch(() => {});
+    refreshNetworkShares();
     nkfApi.getOmarchyTheme().then((t) => {
       if (t) {
         setOmarchyTheme(t);
@@ -818,6 +838,91 @@ export default function App() {
             </div>
           </div>
 
+          {/* Network Shares Section */}
+          <div>
+            <div className="px-2 py-1 flex items-center justify-between">
+              <span
+                className="text-[10px] font-semibold uppercase tracking-wider"
+                style={{ color: "var(--text-muted)" }}
+              >
+                Network
+              </span>
+              <div className="flex items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={refreshNetworkShares}
+                  title="Scan network shares"
+                  className="p-0.5 rounded hover:bg-white/10 cursor-pointer"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  <RefreshCw size={11} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNetworkModalOpen(true)}
+                  title="Add / Connect Network Share"
+                  className="p-0.5 rounded hover:bg-white/10 cursor-pointer"
+                  style={{ color: "var(--accent)" }}
+                >
+                  <Plus size={12} />
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-0.5">
+              {[
+                ...networkShares,
+                ...savedShares.filter(
+                  (s) => !networkShares.some((n) => n.path.toLowerCase() === s.path.toLowerCase())
+                ),
+              ].map((share) => (
+                <div
+                  key={share.path}
+                  className="group flex items-center gap-1 rounded-lg transition-colors"
+                  style={{
+                    background: currentDir === share.path ? "var(--surface-hover)" : "transparent",
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => navigatePane(activePane, share.path)}
+                    title={share.remote || share.path}
+                    className="flex-1 min-w-0 flex items-center gap-2 px-2.5 py-1.5 text-xs text-left cursor-pointer"
+                    style={{
+                      color: currentDir === share.path ? "var(--text)" : "var(--text-muted)",
+                    }}
+                  >
+                    <Network size={14} className="shrink-0" style={{ color: "var(--accent)" }} />
+                    <span className="truncate">{share.name}</span>
+                  </button>
+                  {savedShares.some((s) => s.path === share.path) && (
+                    <button
+                      type="button"
+                      title="Remove saved share"
+                      onClick={() => {
+                        const next = savedShares.filter((s) => s.path !== share.path);
+                        setSavedShares(next);
+                        localStorage.setItem(SAVED_SHARES_KEY, JSON.stringify(next));
+                      }}
+                      className="opacity-0 group-hover:opacity-100 p-1 mr-1 rounded hover:bg-white/10 cursor-pointer"
+                    >
+                      <X size={11} />
+                    </button>
+                  )}
+                </div>
+              ))}
+
+              <button
+                type="button"
+                onClick={() => setNetworkModalOpen(true)}
+                className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left cursor-pointer opacity-75 hover:opacity-100"
+                style={{ color: "var(--text-muted)" }}
+              >
+                <Plus size={13} /> Add Network Share...
+              </button>
+            </div>
+          </div>
+
           {bookmarks.length > 0 && (
             <div>
               <div
@@ -944,6 +1049,29 @@ export default function App() {
         dirPath={currentDir}
         onClose={() => setDiskUsageOpen(false)}
         onNavigate={(p) => navigatePane(activePane, p)}
+      />
+
+      <NetworkShareModal
+        open={networkModalOpen}
+        isWindows={platform === "windows"}
+        onClose={() => setNetworkModalOpen(false)}
+        onConnected={(mountedPath, remoteLabel) => {
+          const item: NetworkShareItem = {
+            name: baseName(remoteLabel) || mountedPath,
+            path: mountedPath,
+            remote: remoteLabel,
+            kind: "smb",
+          };
+          setSavedShares((prev) => {
+            const next = [item, ...prev.filter((s) => s.path !== mountedPath)];
+            localStorage.setItem(SAVED_SHARES_KEY, JSON.stringify(next));
+            return next;
+          });
+          refreshNetworkShares();
+          navigatePane(activePane, mountedPath);
+          showToast(`Connected to ${remoteLabel}`);
+        }}
+        onError={(msg) => showToast(msg, true)}
       />
     </div>
   );

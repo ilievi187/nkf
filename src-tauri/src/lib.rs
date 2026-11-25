@@ -1,11 +1,22 @@
 use base64::Engine;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{LazyLock, Mutex};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+static ICON_CACHE: LazyLock<Mutex<HashMap<String, Option<String>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Serialize, Clone)]
 pub struct FileEntry {
@@ -23,12 +34,20 @@ pub struct FileEntry {
 pub struct PlaceItem {
     pub name: String,
     pub path: String,
-    pub kind: String, // "home" | "desktop" | "documents" | "downloads" | "pictures" | "music" | "videos" | "drive"
+    pub kind: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct NetworkShareItem {
+    pub name: String,
+    pub path: String,
+    pub remote: String,
+    pub kind: String, // "mapped" | "unc" | "host" | "smb" | "nfs" | "sshfs"
 }
 
 #[derive(Serialize)]
 pub struct PreviewData {
-    pub kind: String, // "text" | "image" | "binary" | "dir"
+    pub kind: String,
     pub mime: String,
     pub content: String,
     pub size: u64,
@@ -95,6 +114,11 @@ fn entry_from_path(path: &Path) -> Option<FileEntry> {
 }
 
 #[tauri::command]
+fn get_platform() -> String {
+    std::env::consts::OS.to_string()
+}
+
+#[tauri::command]
 fn get_initial_dir() -> String {
     if let Some(arg) = std::env::args().skip(1).find(|a| !a.starts_with('-')) {
         let p = PathBuf::from(&arg);
@@ -157,7 +181,6 @@ fn get_system_places() -> Vec<PlaceItem> {
             kind: "drive".to_string(),
         });
 
-        // Detect mounted USB/external drives under /run/media/$USER or /mnt
         if let Ok(user) = std::env::var("USER") {
             let media_dir = PathBuf::from("/run/media").join(user);
             if let Ok(rd) = fs::read_dir(media_dir) {
@@ -176,6 +199,487 @@ fn get_system_places() -> Vec<PlaceItem> {
     }
 
     places
+}
+
+/// Auto-detect mounted/mapped network shares on Windows and Linux
+#[tauri::command]
+fn get_network_shares() -> Vec<NetworkShareItem> {
+    let mut shares = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        // 1. Parse `net use` for mapped network drives and active UNC connections
+        if let Ok(out) = Command::new("net")
+            .arg("use")
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                if let Some(unc_pos) = line.find("\\\\") {
+                    let before = line[..unc_pos].trim();
+                    let rest = line[unc_pos..].trim();
+                    let unc = rest.split_whitespace().next().unwrap_or("").to_string();
+                    if unc.len() < 4 {
+                        continue;
+                    }
+                    // Look for drive letter like "Z:" in `before`
+                    let drive = before
+                        .split_whitespace()
+                        .find(|tok| tok.len() == 2 && tok.ends_with(':'));
+                    let (name, path, kind) = if let Some(d) = drive {
+                        let leaf = unc.split('\\').filter(|s| !s.is_empty()).last().unwrap_or(&unc);
+                        (format!("{} ({})", leaf, d), format!("{}\\", d), "mapped".to_string())
+                    } else {
+                        let leaf = unc.split('\\').filter(|s| !s.is_empty()).last().unwrap_or(&unc);
+                        (leaf.to_string(), unc.clone(), "unc".to_string())
+                    };
+                    if seen.insert(path.to_lowercase()) {
+                        shares.push(NetworkShareItem {
+                            name,
+                            path,
+                            remote: unc,
+                            kind,
+                        });
+                    }
+                }
+            }
+        }
+
+        // 2. Discover local machine's shared folders via `net share`
+        if let Ok(out) = Command::new("net")
+            .arg("share")
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        {
+            let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".to_string());
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty()
+                    || trimmed.starts_with('-')
+                    || trimmed.starts_with("Share name")
+                    || trimmed.starts_with("The command")
+                {
+                    continue;
+                }
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let share_name = parts[0];
+                    if share_name.ends_with('$') || share_name.eq_ignore_ascii_case("IPC$") {
+                        continue;
+                    }
+                    let unc = format!("\\\\{}\\{}", host, share_name);
+                    if seen.insert(unc.to_lowercase()) {
+                        shares.push(NetworkShareItem {
+                            name: format!("{} (Shared)", share_name),
+                            path: unc.clone(),
+                            remote: unc,
+                            kind: "smb".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 1. Parse /proc/mounts for CIFS, SMB, NFS, SSHFS
+        if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
+            for line in mounts.lines() {
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                if cols.len() < 3 {
+                    continue;
+                }
+                let remote = cols[0].replace("\\040", " ");
+                let mount_point = cols[1].replace("\\040", " ");
+                let fstype = cols[2];
+                let kind = match fstype {
+                    "cifs" | "smb3" | "smbfs" => "smb",
+                    "nfs" | "nfs4" => "nfs",
+                    "fuse.sshfs" => "sshfs",
+                    _ => continue,
+                };
+                if seen.insert(mount_point.clone()) {
+                    let name = Path::new(&mount_point)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| mount_point.clone());
+                    shares.push(NetworkShareItem {
+                        name,
+                        path: mount_point,
+                        remote,
+                        kind: kind.to_string(),
+                    });
+                }
+            }
+        }
+
+        // 2. Detect GVFS mounted network shares (/run/user/$UID/gvfs/*)
+        if let Ok(xdg_runtime) = std::env::var("XDG_RUNTIME_DIR") {
+            let gvfs_dir = PathBuf::from(xdg_runtime).join("gvfs");
+            if let Ok(rd) = fs::read_dir(gvfs_dir) {
+                for entry in rd.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        let raw_name = entry.file_name().to_string_lossy().to_string();
+                        let full = p.to_string_lossy().to_string();
+                        if seen.insert(full.clone()) {
+                            let kind = if raw_name.starts_with("smb") {
+                                "smb"
+                            } else if raw_name.starts_with("sftp") {
+                                "sshfs"
+                            } else {
+                                "unc"
+                            };
+                            shares.push(NetworkShareItem {
+                                name: raw_name.clone(),
+                                path: full,
+                                remote: raw_name,
+                                kind: kind.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    shares
+}
+
+/// Connect / map a network share (UNC \\server\share or smb://server/share)
+#[tauri::command]
+fn connect_network_share(
+    share_path: String,
+    username: String,
+    password: String,
+    drive_letter: String,
+) -> Result<String, String> {
+    let trimmed = share_path.trim();
+    if trimmed.is_empty() {
+        return Err("Network share path cannot be empty.".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Normalize smb://host/share -> \\host\share
+        let unc = if trimmed.starts_with("smb://") {
+            format!(
+                "\\\\{}",
+                trimmed.trim_start_matches("smb://").replace('/', "\\")
+            )
+        } else {
+            trimmed.replace('/', "\\")
+        };
+
+        let mut cmd = Command::new("net");
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.arg("use");
+
+        let mapped_drive = drive_letter.trim().to_uppercase();
+        if !mapped_drive.is_empty() && mapped_drive != "AUTO" {
+            let d = if mapped_drive.ends_with(':') {
+                mapped_drive
+            } else {
+                format!("{}:", mapped_drive)
+            };
+            cmd.arg(&d);
+            cmd.arg(&unc);
+            if !password.is_empty() {
+                cmd.arg(&password);
+            }
+            if !username.is_empty() {
+                cmd.arg(format!("/user:{}", username));
+            }
+            cmd.arg("/persistent:yes");
+
+            let out = cmd.output().map_err(|e| format!("Failed to run net use: {}", e))?;
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                return Err(format!("Could not connect: {} {}", err.trim(), stdout.trim()));
+            }
+            return Ok(format!("{}\\", d));
+        }
+
+        // Direct UNC connection (no drive letter)
+        cmd.arg(&unc);
+        if !password.is_empty() {
+            cmd.arg(&password);
+        }
+        if !username.is_empty() {
+            cmd.arg(format!("/user:{}", username));
+        }
+        let out = cmd.output().map_err(|e| format!("Failed to run net use: {}", e))?;
+        if !out.status.success() {
+            // If already accessible anonymously, allow opening directly
+            if Path::new(&unc).exists() {
+                return Ok(unc);
+            }
+            let err = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            return Err(format!("Could not connect: {} {}", err.trim(), stdout.trim()));
+        }
+        Ok(unc)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (&username, &password, &drive_letter);
+        if Path::new(trimmed).exists() {
+            return Ok(trimmed.to_string());
+        }
+        // Convert \\server\share -> smb://server/share
+        let uri = if trimmed.starts_with("\\\\") {
+            format!("smb://{}", trimmed.trim_start_matches("\\\\").replace('\\', "/"))
+        } else {
+            trimmed.to_string()
+        };
+
+        let out = Command::new("gio")
+            .args(["mount", &uri])
+            .output()
+            .map_err(|e| format!("Failed to run gio mount (install gvfs-smb): {}", e))?;
+
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("Mount failed: {}", err.trim()));
+        }
+
+        // Find newly mounted gvfs path
+        if let Ok(xdg_runtime) = std::env::var("XDG_RUNTIME_DIR") {
+            let gvfs_dir = PathBuf::from(xdg_runtime).join("gvfs");
+            if let Ok(rd) = fs::read_dir(&gvfs_dir) {
+                for entry in rd.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_lowercase();
+                    let host_part = uri
+                        .trim_start_matches("smb://")
+                        .trim_start_matches("sftp://")
+                        .split('/')
+                        .next()
+                        .unwrap_or("")
+                        .to_lowercase();
+                    if !host_part.is_empty() && name.contains(&host_part) {
+                        return Ok(entry.path().to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+        Err("Mounted, but could not locate GVFS mount path.".to_string())
+    }
+}
+
+#[tauri::command]
+fn disconnect_network_share(target: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let clean = target.trim_end_matches('\\');
+        let out = Command::new("net")
+            .args(["use", clean, "/delete", "/yes"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let out = Command::new("gio")
+            .args(["mount", "-u", &target])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Extract authentic Windows Shell icons (cached in memory as PNG data URLs)
+#[cfg(target_os = "windows")]
+fn extract_windows_icon_data_url(path: &str, is_dir: bool, ext: &str) -> Option<String> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
+    use windows_sys::Win32::UI::Shell::{
+        SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_USEFILEATTRIBUTES,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO};
+
+    // Per-file icons for executables/shortcuts/icons; shared cache by extension for everything else
+    let unique_per_file = !is_dir && matches!(ext, "exe" | "lnk" | "ico" | "url" | "cur");
+    let query_target = if unique_per_file {
+        path.to_string()
+    } else if is_dir {
+        "folder".to_string()
+    } else if !ext.is_empty() {
+        format!("file.{}", ext)
+    } else {
+        "file".to_string()
+    };
+
+    let mut wide: Vec<u16> = query_target.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut shfi: SHFILEINFOW = unsafe { std::mem::zeroed() };
+    let attrs = if is_dir {
+        FILE_ATTRIBUTE_DIRECTORY
+    } else {
+        FILE_ATTRIBUTE_NORMAL
+    };
+    let flags = if unique_per_file {
+        SHGFI_ICON | SHGFI_LARGEICON
+    } else {
+        SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES
+    };
+
+    let res = unsafe {
+        SHGetFileInfoW(
+            wide.as_mut_ptr(),
+            attrs,
+            &mut shfi,
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            flags,
+        )
+    };
+    if res == 0 || shfi.hIcon.is_null() {
+        return None;
+    }
+
+    let hicon = shfi.hIcon;
+    let mut icon_info: ICONINFO = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetIconInfo(hicon, &mut icon_info) };
+    if ok == 0 {
+        unsafe { DestroyIcon(hicon) };
+        return None;
+    }
+
+    let hbm = if !icon_info.hbmColor.is_null() {
+        icon_info.hbmColor
+    } else {
+        icon_info.hbmMask
+    };
+
+    let mut bmp: BITMAP = unsafe { std::mem::zeroed() };
+    let got_bmp = unsafe {
+        GetObjectW(
+            hbm as _,
+            std::mem::size_of::<BITMAP>() as i32,
+            &mut bmp as *mut BITMAP as _,
+        )
+    };
+
+    let mut result_url = None;
+    if got_bmp != 0 && bmp.bmWidth > 0 && bmp.bmHeight > 0 {
+        let w = bmp.bmWidth as u32;
+        let h = bmp.bmHeight.unsigned_abs();
+        let mut bi: BITMAPINFO = unsafe { std::mem::zeroed() };
+        bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bi.bmiHeader.biWidth = w as i32;
+        bi.bmiHeader.biHeight = -(h as i32); // top-down
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        let hdc = unsafe { CreateCompatibleDC(std::ptr::null_mut()) };
+        if !hdc.is_null() {
+            let lines = unsafe {
+                GetDIBits(
+                    hdc,
+                    hbm,
+                    0,
+                    h,
+                    pixels.as_mut_ptr() as _,
+                    &mut bi,
+                    DIB_RGB_COLORS,
+                )
+            };
+            unsafe { DeleteDC(hdc) };
+
+            if lines > 0 {
+                // Convert BGRA -> RGBA and handle icons without alpha channel
+                let mut any_alpha = false;
+                for chunk in pixels.chunks_exact_mut(4) {
+                    chunk.swap(0, 2);
+                    if chunk[3] != 0 {
+                        any_alpha = true;
+                    }
+                }
+                if !any_alpha {
+                    for chunk in pixels.chunks_exact_mut(4) {
+                        chunk[3] = 255;
+                    }
+                }
+
+                let mut png_buf = Vec::new();
+                {
+                    let mut encoder = png::Encoder::new(&mut png_buf, w, h);
+                    encoder.set_color(png::ColorType::Rgba);
+                    encoder.set_depth(png::BitDepth::Eight);
+                    if let Ok(mut writer) = encoder.write_header() {
+                        if writer.write_image_data(&pixels).is_ok() {
+                            drop(writer);
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(&png_buf);
+                            result_url = Some(format!("data:image/png;base64,{}", b64));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    unsafe {
+        if !icon_info.hbmColor.is_null() {
+            DeleteObject(icon_info.hbmColor as _);
+        }
+        if !icon_info.hbmMask.is_null() {
+            DeleteObject(icon_info.hbmMask as _);
+        }
+        DestroyIcon(hicon);
+    }
+
+    result_url
+}
+
+#[tauri::command]
+fn get_native_icon(path: String, is_dir: bool, extension: String) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let ext = extension.to_lowercase();
+        let unique = !is_dir && matches!(ext.as_str(), "exe" | "lnk" | "ico" | "url" | "cur");
+        let cache_key = if unique {
+            format!("path:{}", path)
+        } else if is_dir {
+            "dir".to_string()
+        } else {
+            format!("ext:{}", ext)
+        };
+
+        if let Ok(guard) = ICON_CACHE.lock() {
+            if let Some(cached) = guard.get(&cache_key) {
+                return cached.clone();
+            }
+        }
+
+        let extracted = extract_windows_icon_data_url(&path, is_dir, &ext);
+        if let Ok(mut guard) = ICON_CACHE.lock() {
+            guard.insert(cache_key, extracted.clone());
+        }
+        extracted
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (&path, is_dir, &extension, &ICON_CACHE);
+        None
+    }
 }
 
 #[tauri::command]
@@ -223,7 +727,6 @@ fn read_preview(path: String) -> Result<PreviewData, String> {
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
-    // Images up to 12 MB
     let img_mime = match ext.as_str() {
         "png" => Some("image/png"),
         "jpg" | "jpeg" => Some("image/jpeg"),
@@ -249,7 +752,6 @@ fn read_preview(path: String) -> Result<PreviewData, String> {
         }
     }
 
-    // Text / Code files (read up to 96 KB)
     let is_known_text = matches!(
         ext.as_str(),
         "txt"
@@ -603,7 +1105,10 @@ fn extract_zip(zip_path: String, dest_dir: String) -> Result<usize, String> {
 #[tauri::command]
 fn open_with_default(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
-    let res = Command::new("cmd").args(["/C", "start", "", &path]).spawn();
+    let res = Command::new("cmd")
+        .args(["/C", "start", "", &path])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
     #[cfg(target_os = "macos")]
     let res = Command::new("open").arg(&path).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -749,8 +1254,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            get_platform,
             get_initial_dir,
             get_system_places,
+            get_network_shares,
+            connect_network_share,
+            disconnect_network_share,
+            get_native_icon,
             list_directory,
             read_preview,
             search_files,
