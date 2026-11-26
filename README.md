@@ -6,6 +6,8 @@
 
 ![NKF on Windows in split view](docs/screenshots/nkf-windows-split-view.png)
 
+![NKF on Windows with the integrated terminal open](docs/screenshots/nkf-windows-integrated-terminal.png)
+
 ## Features
 - **Dolphin-Style Split View (`F3`) & Tabs (`Ctrl+T`)**: Work across two folders side by side with 1-click copy/move between panes.
 - **Quick Look (`Space`)**: Instant inline preview of images, code, Markdown, JSON, logs, and folders without leaving the file manager.
