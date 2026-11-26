@@ -226,6 +226,14 @@ export const FilePane: React.FC<FilePaneProps> = ({
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortAsc, setSortAsc] = useState(true);
   const lastClickedIdx = useRef<number | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const justMarqueeRef = useRef(false);
+  const [marquee, setMarquee] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
 
   useEffect(() => {
     setPathInput(path);
@@ -500,10 +508,81 @@ export const FilePane: React.FC<FilePaneProps> = ({
 
       {/* File List / Grid */}
       <div
-        className="flex-1 overflow-auto nkf-scroll"
+        ref={scrollContainerRef}
+        className="flex-1 overflow-auto nkf-scroll relative select-none"
         style={{
           outline: dropHoverPath === path ? "2px dashed var(--accent)" : "none",
           outlineOffset: "-4px",
+        }}
+        onMouseDown={(e) => {
+          if (e.button !== 0) return;
+          const target = e.target as HTMLElement;
+          if (target.closest("[data-entry-path], button, input, th, thead")) return;
+          const container = scrollContainerRef.current;
+          if (!container) return;
+
+          onFocus();
+          const rect = container.getBoundingClientRect();
+          const startClientX = e.clientX;
+          const startClientY = e.clientY;
+          const startX = e.clientX - rect.left + container.scrollLeft;
+          const startY = e.clientY - rect.top + container.scrollTop;
+          const additive = e.ctrlKey || e.metaKey;
+          const baseSelection = additive ? new Set(selectedPaths) : new Set<string>();
+          let moved = false;
+
+          const onMouseMove = (ev: MouseEvent) => {
+            const dx = ev.clientX - startClientX;
+            const dy = ev.clientY - startClientY;
+            if (!moved && Math.hypot(dx, dy) < 4) return;
+            moved = true;
+
+            const curRect = container.getBoundingClientRect();
+            const curX = ev.clientX - curRect.left + container.scrollLeft;
+            const curY = ev.clientY - curRect.top + container.scrollTop;
+
+            const boxLeft = Math.min(startX, curX);
+            const boxTop = Math.min(startY, curY);
+            const boxWidth = Math.abs(curX - startX);
+            const boxHeight = Math.abs(curY - startY);
+            setMarquee({ left: boxLeft, top: boxTop, width: boxWidth, height: boxHeight });
+
+            const selClientLeft = Math.min(startClientX, ev.clientX);
+            const selClientRight = Math.max(startClientX, ev.clientX);
+            const selClientTop = Math.min(startClientY, ev.clientY);
+            const selClientBottom = Math.max(startClientY, ev.clientY);
+
+            const nextSel = new Set(baseSelection);
+            const nodes = container.querySelectorAll<HTMLElement>("[data-entry-path]");
+            nodes.forEach((node) => {
+              const nr = node.getBoundingClientRect();
+              const overlaps =
+                nr.right >= selClientLeft &&
+                nr.left <= selClientRight &&
+                nr.bottom >= selClientTop &&
+                nr.top <= selClientBottom;
+              if (overlaps) {
+                const p = node.getAttribute("data-entry-path");
+                if (p) nextSel.add(p);
+              }
+            });
+            onSelectChange(nextSel, displayed);
+          };
+
+          const onMouseUp = () => {
+            window.removeEventListener("mousemove", onMouseMove);
+            window.removeEventListener("mouseup", onMouseUp);
+            setMarquee(null);
+            if (moved) {
+              justMarqueeRef.current = true;
+              window.setTimeout(() => {
+                justMarqueeRef.current = false;
+              }, 80);
+            }
+          };
+
+          window.addEventListener("mousemove", onMouseMove);
+          window.addEventListener("mouseup", onMouseUp);
         }}
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes("application/x-nkf-paths")) {
@@ -516,18 +595,34 @@ export const FilePane: React.FC<FilePaneProps> = ({
         }}
         onDrop={(e) => handleDropOnTarget(e, path)}
         onContextMenu={(e) => {
-          if (e.target === e.currentTarget) {
+          const target = e.target as HTMLElement;
+          if (!target.closest("[data-entry-path]")) {
             e.preventDefault();
             onFocus();
             onContextMenu(e, null);
           }
         }}
         onClick={(e) => {
-          if (e.target === e.currentTarget) {
+          if (justMarqueeRef.current) return;
+          const target = e.target as HTMLElement;
+          if (!target.closest("[data-entry-path], button, input, th, thead")) {
             onSelectChange(new Set(), displayed);
           }
         }}
       >
+        {marquee && (
+          <div
+            className="pointer-events-none absolute z-30 rounded-sm"
+            style={{
+              left: marquee.left,
+              top: marquee.top,
+              width: marquee.width,
+              height: marquee.height,
+              border: "1px solid var(--accent)",
+              background: "color-mix(in srgb, var(--accent) 20%, transparent)",
+            }}
+          />
+        )}
         {loading ? (
           <div className="h-full flex items-center justify-center gap-2 text-xs" style={{ color: "var(--text-muted)" }}>
             <Loader2 size={16} className="animate-spin" /> Loading...
@@ -568,6 +663,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
                 return (
                   <tr
                     key={entry.path}
+                    data-entry-path={entry.path}
                     draggable
                     onDragStart={(e) => handleDragStart(e, entry)}
                     onDragOver={(e) => {
@@ -633,6 +729,7 @@ export const FilePane: React.FC<FilePaneProps> = ({
               return (
                 <button
                   key={entry.path}
+                  data-entry-path={entry.path}
                   type="button"
                   draggable
                   onDragStart={(e) => handleDragStart(e, entry)}

@@ -1,3 +1,6 @@
+mod mcp;
+mod pty;
+
 use base64::Engine;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -1441,6 +1444,94 @@ fn extract_zip(zip_path: String, dest_dir: String) -> Result<usize, String> {
 }
 
 #[tauri::command]
+fn open_with_dialog(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        Command::new("rundll32.exe")
+            .args(["shell32.dll,OpenAs_RunDLL", &path])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        open_with_default(path)
+    }
+}
+
+#[tauri::command]
+fn reveal_in_system(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer.exe")
+            .arg(format!("/select,{}", path))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-R", &path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let p = PathBuf::from(&path);
+        let dir = if p.is_dir() {
+            p
+        } else {
+            p.parent().map(|pp| pp.to_path_buf()).unwrap_or(p)
+        };
+        Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+fn open_system_properties(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let p = PathBuf::from(&path);
+        let parent = p
+            .parent()
+            .map(|d| d.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let esc = |s: &str| s.replace('\'', "''");
+        let ps = format!(
+            "$sh = New-Object -ComObject Shell.Application; $f = $sh.NameSpace('{}'); if ($f) {{ $i = $f.ParseName('{}'); if ($i) {{ $i.InvokeVerb('Properties'); Start-Sleep -Seconds 30 }} }}",
+            esc(&parent),
+            esc(&name)
+        );
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err("Native Windows Properties sheet is only available on Windows".into())
+    }
+}
+
+#[tauri::command]
 fn open_with_default(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let res = Command::new("cmd")
@@ -1852,10 +1943,68 @@ fn compare_folders(left_dir: String, right_dir: String) -> Result<Vec<CompareIte
     Ok(items)
 }
 
+pub fn run_mcp_server() {
+    mcp::run_mcp_stdio();
+}
+
+pub(crate) fn mcp_list_directory(path: String, show_hidden: bool) -> Result<serde_json::Value, String> {
+    let items = list_directory(path, show_hidden)?;
+    serde_json::to_value(items).map_err(|e| e.to_string())
+}
+
+pub(crate) fn mcp_search_files(
+    root_dir: String,
+    query: String,
+    max_results: usize,
+) -> Result<serde_json::Value, String> {
+    let items = search_files(root_dir, query, max_results)?;
+    serde_json::to_value(items).map_err(|e| e.to_string())
+}
+
+pub(crate) fn mcp_find_duplicates(root_dirs: Vec<String>) -> Result<serde_json::Value, String> {
+    let items = find_duplicates(root_dirs)?;
+    serde_json::to_value(items).map_err(|e| e.to_string())
+}
+
+pub(crate) fn mcp_compute_folder_sizes(dir: String) -> Result<serde_json::Value, String> {
+    let items = compute_folder_sizes(dir)?;
+    serde_json::to_value(items).map_err(|e| e.to_string())
+}
+
+pub(crate) fn mcp_compare_folders(
+    left_dir: String,
+    right_dir: String,
+) -> Result<serde_json::Value, String> {
+    let items = compare_folders(left_dir, right_dir)?;
+    serde_json::to_value(items).map_err(|e| e.to_string())
+}
+
+pub(crate) fn mcp_get_file_properties(
+    path: String,
+    compute_hash: bool,
+) -> Result<serde_json::Value, String> {
+    let item = get_file_properties(path, compute_hash)?;
+    serde_json::to_value(item).map_err(|e| e.to_string())
+}
+
+pub(crate) fn mcp_read_preview(path: String) -> Result<serde_json::Value, String> {
+    let item = read_preview(path)?;
+    serde_json::to_value(item).map_err(|e| e.to_string())
+}
+
+pub(crate) fn mcp_create_folder(
+    parent_dir: String,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let created = create_folder(parent_dir, name)?;
+    Ok(serde_json::json!({ "created": created }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(pty::PtyState::default())
         .invoke_handler(tauri::generate_handler![
             get_platform,
             get_username,
@@ -1885,11 +2034,20 @@ pub fn run() {
             compress_to_zip,
             extract_zip,
             open_with_default,
+            open_with_dialog,
+            reveal_in_system,
+            open_system_properties,
             open_terminal_here,
             get_omarchy_theme,
             open_external_url,
             get_default_file_manager_status,
-            set_default_file_manager
+            set_default_file_manager,
+            pty::pty_spawn,
+            pty::pty_write,
+            pty::pty_resize,
+            pty::pty_close,
+            mcp::get_mcp_config_json,
+            mcp::save_live_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running NKF");

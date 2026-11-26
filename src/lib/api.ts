@@ -264,8 +264,18 @@ export const nkfApi = {
   extractZip: (zipPath: string, destDir: string) =>
     invoke<number>("extract_zip", { zipPath, destDir }),
   openWithDefault: (path: string) => invoke<void>("open_with_default", { path }),
+  openWithDialog: (path: string) => invoke<void>("open_with_dialog", { path }),
+  revealInSystem: (path: string) => invoke<void>("reveal_in_system", { path }),
+  openSystemProperties: (path: string) => invoke<void>("open_system_properties", { path }),
   openTerminalHere: (dir: string) => invoke<void>("open_terminal_here", { dir }),
   openExternalUrl: (url: string) => invoke<void>("open_external_url", { url }),
+  ptySpawn: (cwd: string, cols: number, rows: number) =>
+    invoke<void>("pty_spawn", { cwd, cols, rows }),
+  ptyWrite: (data: string) => invoke<void>("pty_write", { data }),
+  ptyResize: (cols: number, rows: number) => invoke<void>("pty_resize", { cols, rows }),
+  ptyClose: () => invoke<void>("pty_close"),
+  getMcpConfigJson: () => invoke<string>("get_mcp_config_json"),
+  saveLiveState: (stateJson: string) => invoke<void>("save_live_state", { stateJson }),
   getOmarchyTheme: async (): Promise<ThemeDefinition | null> => {
     try {
       const raw = await invoke<{

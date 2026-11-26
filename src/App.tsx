@@ -56,6 +56,7 @@ import { BatchRenameModal } from "./components/BatchRenameModal";
 import { DiskUsageModal } from "./components/DiskUsageModal";
 import { NetworkShareModal } from "./components/NetworkShareModal";
 import { DuplicatesModal } from "./components/DuplicatesModal";
+import { TerminalPanel } from "./components/TerminalPanel";
 import { PropertiesModal } from "./components/PropertiesModal";
 import { ContextMenu, type ContextMenuState } from "./components/ContextMenu";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
@@ -186,6 +187,7 @@ export default function App() {
   const [compareOpen, setCompareOpen] = useState(false);
   const [diffPair, setDiffPair] = useState<[string, string] | null>(null);
   const [transfer, setTransfer] = useState<TransferProgress | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
 
   // Toast
   const [toast, setToast] = useState<{ msg: string; isError?: boolean } | null>(null);
@@ -303,6 +305,20 @@ export default function App() {
     }
     return null;
   }, [selectedEntries, splitMode, leftEntries, rightEntries, leftSel, rightSel]);
+
+  // Publish live pane & selection state for NKF MCP server (nkf_get_state)
+  useEffect(() => {
+    if (!currentDir) return;
+    const payload = JSON.stringify({
+      activePane,
+      splitMode,
+      leftDir: activeLeftTab?.path || "",
+      rightDir: splitMode ? rightPane.path : "",
+      currentDir,
+      selectedPaths: Array.from(activeSel),
+    });
+    nkfApi.saveLiveState(payload).catch(() => {});
+  }, [activePane, splitMode, activeLeftTab?.path, rightPane.path, currentDir, activeSel]);
 
   const triggerRefresh = useCallback(() => {
     setLeftRefreshTick((t) => t + 1);
@@ -565,9 +581,9 @@ export default function App() {
           }
           return !v;
         });
-      } else if (e.key === "F4" && currentDir) {
+      } else if (e.key === "F4") {
         e.preventDefault();
-        nkfApi.openTerminalHere(currentDir).catch((err) => showToast(String(err), true));
+        setTerminalOpen((v) => !v);
       } else if (e.key === "F5") {
         e.preventDefault();
         triggerRefresh();
@@ -857,12 +873,13 @@ export default function App() {
 
           <button
             type="button"
-            onClick={() =>
-              currentDir && nkfApi.openTerminalHere(currentDir).catch((e) => showToast(String(e), true))
-            }
+            onClick={() => setTerminalOpen((v) => !v)}
             className="p-1.5 rounded-lg cursor-pointer"
-            style={{ background: "var(--surface-alt)" }}
-            title="Open Terminal Here (F4)"
+            style={{
+              background: terminalOpen ? "var(--accent)" : "var(--surface-alt)",
+              color: terminalOpen ? "var(--accent-text)" : "var(--text)",
+            }}
+            title="Toggle Integrated Terminal (F4)"
           >
             <Terminal size={15} />
           </button>
@@ -1061,6 +1078,24 @@ export default function App() {
                       : "Set as Default File Manager"}
                   </span>
                   {isDefaultFm && <Check size={13} className="text-emerald-400 shrink-0" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const cfg = await nkfApi.getMcpConfigJson();
+                      await navigator.clipboard.writeText(cfg);
+                      showToast("Copied NKF MCP Server config JSON to clipboard!");
+                    } catch (e) {
+                      showToast(String(e), true);
+                    } finally {
+                      setShowThemeMenu(false);
+                    }
+                  }}
+                  className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left cursor-pointer hover:bg-white/10"
+                  title="Copy MCP server config for Antigravity, Claude, Hermes, Cursor, or Codex"
+                >
+                  <span>Copy MCP Config (AI Agents)</span>
                 </button>
               </div>
             )}
@@ -1362,6 +1397,14 @@ export default function App() {
         </main>
       </div>
 
+      {/* INTEGRATED TERMINAL DRAWER (F4) */}
+      <TerminalPanel
+        open={terminalOpen}
+        cwd={currentDir}
+        platform={platform}
+        onClose={() => setTerminalOpen(false)}
+      />
+
       {/* TRANSFER PROGRESS CARD */}
       {transfer && (
         <div
@@ -1522,6 +1565,7 @@ export default function App() {
       <DiskUsageModal
         open={diskUsageOpen}
         dirPath={currentDir}
+        places={places}
         onClose={() => setDiskUsageOpen(false)}
         onNavigate={(p) => navigatePane(activePane, p)}
       />
@@ -1590,6 +1634,7 @@ export default function App() {
 
       <ContextMenu
         menu={contextMenu}
+        platform={platform}
         selectedCount={activeSel.size}
         canDiff={Boolean(diffCandidates)}
         hasClipboard={Boolean(clipboard)}
@@ -1598,6 +1643,9 @@ export default function App() {
           if (entry.is_dir) navigatePane(activePane, entry.path);
           else nkfApi.openWithDefault(entry.path).catch((e) => showToast(String(e), true));
         }}
+        onOpenWith={(entry) =>
+          nkfApi.openWithDialog(entry.path).catch((e) => showToast(String(e), true))
+        }
         onQuickLook={setQuickLookEntry}
         onDiff={() => diffCandidates && setDiffPair(diffCandidates)}
         onCopy={handleCopy}
@@ -1612,7 +1660,31 @@ export default function App() {
         onZip={handleZip}
         onExtractZip={handleExtractZip}
         onProperties={(p) => setPropertiesPath(p)}
-        onTerminal={() =>
+        onSystemProperties={(p) =>
+          nkfApi.openSystemProperties(p).catch((e) => showToast(String(e), true))
+        }
+        onRevealInSystem={(p) =>
+          nkfApi.revealInSystem(p).catch((e) => showToast(String(e), true))
+        }
+        onPinBookmark={(p) => {
+          setBookmarks((prev) => {
+            if (prev.includes(p)) return prev;
+            const next = [...prev, p];
+            localStorage.setItem(BOOKMARKS_KEY, JSON.stringify(next));
+            return next;
+          });
+          showToast("Pinned folder to sidebar");
+        }}
+        onNewFolder={handleNewFolder}
+        onNewFile={handleNewFile}
+        onSelectAll={() => {
+          const all = new Set(activeEntries.map((e) => e.path));
+          if (activePane === "left") setLeftSel(all);
+          else setRightSel(all);
+        }}
+        onRefresh={triggerRefresh}
+        onIntegratedTerminal={() => setTerminalOpen((v) => !v)}
+        onExternalTerminal={() =>
           currentDir && nkfApi.openTerminalHere(currentDir).catch((e) => showToast(String(e), true))
         }
         onDelete={() => handleDelete(false)}
