@@ -119,6 +119,7 @@ export default function App() {
     window.matchMedia("(prefers-color-scheme: dark)").matches
   );
   const [showThemeMenu, setShowThemeMenu] = useState(false);
+  const [isDefaultFm, setIsDefaultFm] = useState(false);
 
   // Places, Network Shares & Bookmarks
   const [platform, setPlatform] = useState<string>("linux");
@@ -159,10 +160,12 @@ export default function App() {
   });
   const [activePane, setActivePane] = useState<"left" | "right">("left");
 
-  // View options
+  // View options (independent per split pane)
   const [showHidden, setShowHidden] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>("list");
-  const [refreshTick, setRefreshTick] = useState(0);
+  const [leftViewMode, setLeftViewMode] = useState<ViewMode>("list");
+  const [rightViewMode, setRightViewMode] = useState<ViewMode>("list");
+  const [leftRefreshTick, setLeftRefreshTick] = useState(0);
+  const [rightRefreshTick, setRightRefreshTick] = useState(0);
 
   // Selection & Clipboard
   const [leftSel, setLeftSel] = useState<Set<string>>(new Set());
@@ -208,6 +211,7 @@ export default function App() {
     nkfApi.getPlatform().then(setPlatform).catch(() => {});
     nkfApi.getUsername().then(setUsername).catch(() => {});
     nkfApi.getSystemPlaces().then(setPlaces).catch(() => {});
+    nkfApi.getDefaultFileManagerStatus().then(setIsDefaultFm).catch(() => {});
     refreshNetworkShares();
     nkfApi.getOmarchyTheme().then((t) => {
       if (t) setOmarchyTheme(t);
@@ -263,7 +267,8 @@ export default function App() {
       .catch(() => {});
 
     const onFocus = () => {
-      setRefreshTick((t) => t + 1);
+      setLeftRefreshTick((t) => t + 1);
+      setRightRefreshTick((t) => t + 1);
       nkfApi.getOmarchyTheme().then((t) => {
         if (t) setOmarchyTheme(t);
       });
@@ -300,7 +305,8 @@ export default function App() {
   }, [selectedEntries, splitMode, leftEntries, rightEntries, leftSel, rightSel]);
 
   const triggerRefresh = useCallback(() => {
-    setRefreshTick((t) => t + 1);
+    setLeftRefreshTick((t) => t + 1);
+    setRightRefreshTick((t) => t + 1);
   }, []);
 
   // Navigation helpers
@@ -1010,6 +1016,52 @@ export default function App() {
                     {iconSet === set.id && <Check size={13} />}
                   </button>
                 ))}
+                <div className="my-1 border-t" style={{ borderColor: "var(--border)" }} />
+                <div
+                  className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  System Integration
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const next = !isDefaultFm;
+                      const res = await nkfApi.setDefaultFileManager(next);
+                      setIsDefaultFm(res);
+                      showToast(
+                        res
+                          ? "NKF is now your default file manager for folders!"
+                          : platform === "windows"
+                            ? "Restored Windows Explorer as default!"
+                            : "Restored system default file manager!"
+                      );
+                    } catch (e) {
+                      showToast(String(e), true);
+                    } finally {
+                      setShowThemeMenu(false);
+                    }
+                  }}
+                  className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left cursor-pointer"
+                  style={{
+                    background: isDefaultFm ? "var(--surface-hover)" : "transparent",
+                  }}
+                  title={
+                    isDefaultFm
+                      ? "Click to restore Windows Explorer / system default"
+                      : "Open folders in NKF by default (no admin required)"
+                  }
+                >
+                  <span>
+                    {isDefaultFm
+                      ? platform === "windows"
+                        ? "Restore Windows Explorer"
+                        : "Restore System Default"
+                      : "Set as Default File Manager"}
+                  </span>
+                  {isDefaultFm && <Check size={13} className="text-emerald-400 shrink-0" />}
+                </button>
               </div>
             )}
           </div>
@@ -1250,9 +1302,9 @@ export default function App() {
               history={activeLeftTab.history}
               historyIdx={activeLeftTab.historyIdx}
               showHidden={showHidden}
-              viewMode={viewMode}
+              viewMode={leftViewMode}
               iconSet={iconSet}
-              refreshTick={refreshTick}
+              refreshTick={leftRefreshTick}
               selectedPaths={leftSel}
               onFocus={() => setActivePane("left")}
               onNavigate={(p) => navigatePane("left", p)}
@@ -1270,8 +1322,8 @@ export default function App() {
                 setContextMenu({ x: e.clientX, y: e.clientY, entry })
               }
               onDropPaths={handleDropPaths}
-              onToggleViewMode={() => setViewMode((v) => (v === "list" ? "grid" : "list"))}
-              onRefresh={triggerRefresh}
+              onToggleViewMode={() => setLeftViewMode((v) => (v === "list" ? "grid" : "list"))}
+              onRefresh={() => setLeftRefreshTick((t) => t + 1)}
             />
           )}
 
@@ -1283,9 +1335,9 @@ export default function App() {
               history={rightPane.history}
               historyIdx={rightPane.historyIdx}
               showHidden={showHidden}
-              viewMode={viewMode}
+              viewMode={rightViewMode}
               iconSet={iconSet}
-              refreshTick={refreshTick}
+              refreshTick={rightRefreshTick}
               selectedPaths={rightSel}
               onFocus={() => setActivePane("right")}
               onNavigate={(p) => navigatePane("right", p)}
@@ -1303,8 +1355,8 @@ export default function App() {
                 setContextMenu({ x: e.clientX, y: e.clientY, entry })
               }
               onDropPaths={handleDropPaths}
-              onToggleViewMode={() => setViewMode((v) => (v === "list" ? "grid" : "list"))}
-              onRefresh={triggerRefresh}
+              onToggleViewMode={() => setRightViewMode((v) => (v === "list" ? "grid" : "list"))}
+              onRefresh={() => setRightRefreshTick((t) => t + 1)}
             />
           )}
         </main>
@@ -1500,6 +1552,7 @@ export default function App() {
       <DuplicatesModal
         open={duplicatesOpen}
         dirPath={currentDir}
+        otherDir={splitMode ? otherDir : ""}
         onClose={() => setDuplicatesOpen(false)}
         onDeleted={(count) => {
           triggerRefresh();

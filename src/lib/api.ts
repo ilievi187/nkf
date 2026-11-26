@@ -214,9 +214,12 @@ export const nkfApi = {
   getPlatform: () => invoke<string>("get_platform"),
   getUsername: () => invoke<string>("get_username"),
   getInitialDir: () => invoke<string>("get_initial_dir"),
+  getDefaultFileManagerStatus: () => invoke<boolean>("get_default_file_manager_status"),
+  setDefaultFileManager: (enable: boolean) =>
+    invoke<boolean>("set_default_file_manager", { enable }),
   getSystemPlaces: () => invoke<PlaceItem[]>("get_system_places"),
   getNetworkShares: () => invoke<NetworkShareItem[]>("get_network_shares"),
-  findDuplicates: (rootDir: string) => invoke<DuplicateGroup[]>("find_duplicates", { rootDir }),
+  findDuplicates: (rootDirs: string[]) => invoke<DuplicateGroup[]>("find_duplicates", { rootDirs }),
   getFileProperties: (path: string, computeHash = false) =>
     invoke<FileProperties>("get_file_properties", { path, computeHash }),
   writeTextFile: (path: string, content: string) =>

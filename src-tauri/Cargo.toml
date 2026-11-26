@@ -1,6 +1,6 @@
 [package]
 name = "nkf"
-version = "0.7.0"
+version = "0.7.1"
 description = "NKF (NightKnight Files) — Fast, modern, dual-pane FOSS File Manager"
 authors = ["NightKnight Contributors"]
 license = "MIT"

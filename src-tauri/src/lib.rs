@@ -174,17 +174,150 @@ fn get_initial_dir() -> String {
     if let Some(arg) = std::env::args().skip(1).find(|a| !a.starts_with('-')) {
         let p = PathBuf::from(&arg);
         if let Ok(canon) = fs::canonicalize(&p) {
-            if canon.is_dir() {
-                return canon.to_string_lossy().to_string();
-            } else if let Some(parent) = canon.parent() {
-                return parent.to_string_lossy().to_string();
+            let target = if canon.is_dir() {
+                canon
+            } else {
+                canon.parent().map(|pp| pp.to_path_buf()).unwrap_or(canon)
+            };
+            let s = target.to_string_lossy().to_string();
+            #[cfg(target_os = "windows")]
+            if let Some(stripped) = s.strip_prefix(r"\\?\") {
+                return stripped.to_string();
             }
+            return s;
         }
     }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/"))
         .to_string_lossy()
         .to_string()
+}
+
+#[tauri::command]
+fn get_default_file_manager_status() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        if let Ok(out) = Command::new("reg")
+            .args([
+                "query",
+                r"HKCU\Software\Classes\Directory\shell\open\command",
+                "/ve",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).to_lowercase();
+                return s.contains("nkf");
+            }
+        }
+        false
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(out) = Command::new("xdg-mime")
+            .args(["query", "default", "inode/directory"])
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
+                return s == "nkf.desktop";
+            }
+        }
+        false
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        false
+    }
+}
+
+#[tauri::command]
+fn set_default_file_manager(enable: bool) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        let keys = [
+            r"HKCU\Software\Classes\Directory\shell\open",
+            r"HKCU\Software\Classes\Folder\shell\open",
+        ];
+
+        if enable {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let raw = exe.to_string_lossy().to_string();
+            let exe_path = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
+            let cmd_val = format!("\"{}\" \"%1\"", exe_path);
+
+            for base in keys {
+                let cmd_key = format!(r"{}\command", base);
+                let st1 = Command::new("reg")
+                    .args(["add", &cmd_key, "/ve", "/t", "REG_SZ", "/d", &cmd_val, "/f"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .status()
+                    .map_err(|e| e.to_string())?;
+                if !st1.success() {
+                    return Err(format!("Failed to write registry key {}", cmd_key));
+                }
+                // Empty DelegateExecute overrides Windows Explorer's shell delegation
+                let st2 = Command::new("reg")
+                    .args(["add", base, "/v", "DelegateExecute", "/t", "REG_SZ", "/d", "", "/f"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .status()
+                    .map_err(|e| e.to_string())?;
+                if !st2.success() {
+                    return Err(format!("Failed to set DelegateExecute on {}", base));
+                }
+            }
+            Ok(true)
+        } else {
+            for base in keys {
+                let _ = Command::new("reg")
+                    .args(["delete", base, "/f"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .status();
+            }
+            Ok(false)
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if enable {
+            let st = Command::new("xdg-mime")
+                .args(["default", "nkf.desktop", "inode/directory"])
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !st.success() {
+                return Err("xdg-mime failed to set nkf.desktop as default".into());
+            }
+            Ok(true)
+        } else {
+            let fallbacks = [
+                "org.kde.dolphin.desktop",
+                "org.gnome.Nautilus.desktop",
+                "thunar.desktop",
+                "nemo.desktop",
+                "pcmanfm.desktop",
+            ];
+            for fb in fallbacks {
+                if PathBuf::from("/usr/share/applications").join(fb).exists() {
+                    let _ = Command::new("xdg-mime")
+                        .args(["default", fb, "inode/directory"])
+                        .status();
+                    return Ok(false);
+                }
+            }
+            Ok(false)
+        }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        let _ = enable;
+        Err("Default file manager switching is supported on Windows and Linux".into())
+    }
 }
 
 #[tauri::command]
@@ -1495,27 +1628,38 @@ fn get_image_thumb(path: String) -> Option<String> {
 }
 
 #[tauri::command]
-fn find_duplicates(root_dir: String) -> Result<Vec<DuplicateGroup>, String> {
+fn find_duplicates(root_dirs: Vec<String>) -> Result<Vec<DuplicateGroup>, String> {
     let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    let mut seen_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
-    for entry in WalkDir::new(&root_dir)
-        .max_depth(8)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            !(name == ".git" || name == "node_modules" || name == "target")
-        })
-        .flatten()
-    {
-        if !entry.file_type().is_file() {
+    for root_dir in root_dirs {
+        if root_dir.trim().is_empty() {
             continue;
         }
-        let Ok(meta) = entry.metadata() else { continue };
-        let size = meta.len();
-        if size == 0 {
-            continue;
+        for entry in WalkDir::new(&root_dir)
+            .max_depth(8)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy();
+                !(name == ".git" || name == "node_modules" || name == "target")
+            })
+            .flatten()
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            let size = meta.len();
+            if size == 0 {
+                continue;
+            }
+            let p = entry.into_path();
+            let dedup_key = fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+            if !seen_paths.insert(dedup_key) {
+                continue;
+            }
+            by_size.entry(size).or_default().push(p);
         }
-        by_size.entry(size).or_default().push(entry.into_path());
     }
 
     let mut by_hash: HashMap<String, (u64, Vec<FileEntry>)> = HashMap::new();
@@ -1743,7 +1887,9 @@ pub fn run() {
             open_with_default,
             open_terminal_here,
             get_omarchy_theme,
-            open_external_url
+            open_external_url,
+            get_default_file_manager_status,
+            set_default_file_manager
         ])
         .run(tauri::generate_context!())
         .expect("error while running NKF");
@@ -1819,7 +1965,8 @@ mod tests {
         fs::write(dir.path().join("b.bin"), b"duplicate payload 12345").unwrap();
         fs::write(dir.path().join("unique.bin"), b"totally different").unwrap();
 
-        let groups = find_duplicates(dir.path().to_string_lossy().to_string()).unwrap();
+        let dir_str = dir.path().to_string_lossy().to_string();
+        let groups = find_duplicates(vec![dir_str.clone(), dir_str]).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].files.len(), 2);
         assert_eq!(groups[0].wasted_bytes, 23);
