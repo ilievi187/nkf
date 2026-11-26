@@ -4,6 +4,8 @@
 
 **NKF (NightKnight Files)** is a fast, modern, Dolphin-inspired dual-pane FOSS File Manager built with **Rust + Tauri v2 + React**. Runs natively on **Linux** and **Windows**.
 
+![NKF on Windows in split view](docs/screenshots/nkf-windows-split-view.png)
+
 ## Features
 - **Dolphin-Style Split View (`F3`) & Tabs (`Ctrl+T`)**: Work across two folders side by side with 1-click copy/move between panes.
 - **Quick Look (`Space`)**: Instant inline preview of images, code, Markdown, JSON, logs, and folders without leaving the file manager.
